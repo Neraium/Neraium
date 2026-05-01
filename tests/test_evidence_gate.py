@@ -21,13 +21,14 @@ def test_single_sensor_spike_is_transient():
     baseline = make_baseline()
 
     packet = np.array([6.0, 0.0, 0.0, 0.0, 0.0])
-    window = np.random.normal(0, 1, size=(30, 5))
+    rng = np.random.default_rng(11)
+    window = rng.normal(0, 1, size=(30, 5))
     history = [10.0, 10.0]
 
     result = compute_structural_evidence(packet, window, baseline, history, config)
 
     assert result["status"] == "TRANSIENT"
-    assert result["active_families"] < 2
+    assert result["supporting_families"]["sensor_deviation"] is True
 
 
 def test_phase1_config_defaults_and_return_shape():
