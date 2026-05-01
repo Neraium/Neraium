@@ -79,3 +79,31 @@ def test_confirmed_output_contains_pattern_contributors_and_trajectory():
     assert "top_signals" in confirmed["where"]
     assert "top_relationships" in confirmed["where"]
     assert "direction" in confirmed["trajectory"]
+
+
+def test_engine_holds_confirmed_state_when_evidence_dips():
+    rng = np.random.default_rng(367)
+    engine = NeraiumEngine(NeraiumConfig())
+    warm_engine(engine, rng)
+
+    confirmed_seen = False
+    held = None
+    for _ in range(140):
+        shared = rng.normal(0.0, 1.0)
+        packet = healthy_packet(rng)
+        packet[0] = shared + 3.5 + 0.10 * rng.normal()
+        packet[1] = shared + 3.5 + 0.10 * rng.normal()
+        packet[2] = 1.25 + 0.45 * rng.normal()
+
+        result = engine.update(packet)
+        if result["status"] == "CONFIRMED_CHANGE":
+            confirmed_seen = True
+        elif confirmed_seen and result["status"] == "CONFIRMED_CHANGE_HELD":
+            held = result
+            break
+
+    assert held is not None
+    assert held["held"] is True
+    assert held["hold_cycles_remaining"] > 0
+    assert "drift_score" in held
+    assert "top_signals" in held["where"]

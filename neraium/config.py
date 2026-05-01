@@ -17,3 +17,5 @@ class NeraiumConfig:
 
     top_n: int = 3
     top_n_relationships: int = 5
+
+    confirmed_hold_cycles: int = 5

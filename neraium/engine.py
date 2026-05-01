@@ -15,6 +15,7 @@ class NeraiumEngine:
         self._drift_history = []
         self._max_window = 30
         self._max_history = 100
+        self._confirmed_hold_remaining = 0
 
     def update(self, packet):
         x = self._as_array(packet)
@@ -37,7 +38,10 @@ class NeraiumEngine:
         self._drift_history.append(evidence["drift_score"])
         self._drift_history = self._drift_history[-self._max_history:]
 
-        if evidence["status"] == "TRANSIENT":
+        if (
+            evidence["status"] == "TRANSIENT"
+            and self._confirmed_hold_remaining <= 0
+        ):
             return {
                 "status": "TRANSIENT",
                 "drift_score": evidence["drift_score"],
@@ -56,15 +60,38 @@ class NeraiumEngine:
             "cov_shift": evidence["diagnostics"]["cov_shift"],
             "trajectory_pressure": 0.0,
         }
-        previous_scores = self.history[-1] if self.history else None
+        previous_scores = (
+            {
+                **self.history[-1],
+                "recent_history": self.history[-5:],
+            }
+            if self.history
+            else None
+        )
         pattern = classify_pattern(scores, previous_scores)
         trajectory = compute_trajectory_direction(self.history, scores)
 
         self.history.append(scores)
         self.history = self.history[-self._max_history:]
 
+        if evidence["status"] == "CONFIRMED_CHANGE":
+            self._confirmed_hold_remaining = int(
+                getattr(self.config, "confirmed_hold_cycles", 5)
+            )
+            status = "CONFIRMED_CHANGE"
+            held = False
+            hold_cycles_remaining = self._confirmed_hold_remaining
+        else:
+            status = "CONFIRMED_CHANGE_HELD"
+            held = True
+            hold_cycles_remaining = self._confirmed_hold_remaining
+            self._confirmed_hold_remaining = max(
+                0,
+                self._confirmed_hold_remaining - 1,
+            )
+
         return {
-            "status": "CONFIRMED_CHANGE",
+            "status": status,
             "confidence_score": pattern["confidence_score"],
             "what_is_happening": {
                 "pattern": pattern["pattern"],
@@ -73,6 +100,8 @@ class NeraiumEngine:
             "where": contributors,
             "trajectory": trajectory,
             "drift_score": evidence["drift_score"],
+            "held": held,
+            "hold_cycles_remaining": hold_cycles_remaining,
         }
 
     @staticmethod

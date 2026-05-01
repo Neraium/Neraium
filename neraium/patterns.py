@@ -24,16 +24,14 @@ def classify_pattern(scores, previous_scores=None, config=None):
     cov_shift = _score(scores, "cov_shift")
     trajectory_pressure = _score(scores, "trajectory_pressure")
 
+    recent_history = []
     if previous_scores is not None:
-        previous_drift = _score(previous_scores, "drift_score")
-        previous_rel_stability = _score(previous_scores, "rel_stability", 1.0)
-        if (
-            drift_score < previous_drift
-            and rel_stability > previous_rel_stability
-        ):
+        recent_history = previous_scores.get("recent_history", [])
+        recent_scores = (recent_history + [scores])[-5:]
+        if len(recent_scores) >= 5 and _has_sustained_recovery(recent_scores):
             return _result(
                 RECOVERY_PATTERN,
-                "drift_decreasing_and_rel_stability_improving",
+                "sustained_drift_decline_and_rel_stability_improvement",
                 scores,
                 0.65,
             )
@@ -76,4 +74,25 @@ def classify_pattern(scores, previous_scores=None, config=None):
         "no_structural_pattern_rule_matched",
         scores,
         0.40,
+    )
+
+
+def _has_sustained_recovery(recent_scores):
+    drift_values = [_score(score, "drift_score") for score in recent_scores]
+    rel_values = [_score(score, "rel_stability", 1.0) for score in recent_scores]
+
+    drift_declines = sum(
+        current < previous
+        for previous, current in zip(drift_values, drift_values[1:])
+    )
+    rel_improvements = sum(
+        current > previous
+        for previous, current in zip(rel_values, rel_values[1:])
+    )
+    recent_peak = max(drift_values)
+
+    return (
+        drift_declines >= 3
+        and rel_improvements >= 3
+        and drift_values[-1] <= recent_peak * 0.8
     )
