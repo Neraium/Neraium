@@ -46,8 +46,24 @@ def test_confirmed_output_names_spindle_pair():
     output = result.stdout
     if NOT_FOUND_MESSAGE in output:
         return  # nothing to assert
-    assert "spindle_vibration" in output
-    assert "spindle_motor_current" in output
+    assert "Spindle Vibration" in output
+    assert "Spindle Motor Current" in output
+
+
+def test_known_columns_resolve_subsystem_and_component():
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--csv", str(SAMPLE_CSV)],
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout
+    if NOT_FOUND_MESSAGE in output:
+        return  # nothing to assert
+    assert "Spindle assembly" in output
+    assert "Spindle drive" in output
+    assert "spindle_assembly" in output
+    assert "spindle_motor" in output
+    assert "unknown" not in output
 
 
 def test_max_rows_limits_processing():
