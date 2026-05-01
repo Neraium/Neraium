@@ -9,9 +9,41 @@ from neraium.engineer import build_engineer_output
 from neraium.operator import build_operator_output
 
 
+_KNOWN_COLUMNS = {
+    "spindle_vibration": {
+        "name": "Spindle Vibration",
+        "subsystem": "Spindle assembly",
+        "component": "spindle_assembly",
+    },
+    "spindle_motor_current": {
+        "name": "Spindle Motor Current",
+        "subsystem": "Spindle drive",
+        "component": "spindle_motor",
+    },
+    "coolant_flow_rate": {
+        "name": "Coolant Flow Rate",
+        "subsystem": "Coolant loop",
+        "component": "coolant_pump",
+    },
+    "axis_servo_load": {
+        "name": "Axis Servo Load",
+        "subsystem": "Axis drive system",
+        "component": "axis_servo",
+    },
+    "cutting_zone_temperature": {
+        "name": "Cutting Zone Temperature",
+        "subsystem": "Cutting zone",
+        "component": "tool_workpiece_interface",
+    },
+}
+
+
 def _sensor_context(columns):
     return {
-        f"sensor_{i}": {"name": col, "subsystem": "unknown", "component": col}
+        f"sensor_{i}": _KNOWN_COLUMNS.get(
+            col,
+            {"name": col, "subsystem": "unknown", "component": col},
+        )
         for i, col in enumerate(columns)
     }
 
