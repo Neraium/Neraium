@@ -14,3 +14,6 @@ class NeraiumConfig:
     trajectory_threshold: float = 0.3
 
     cov_epsilon: float = 1e-6
+
+    top_n: int = 3
+    top_n_relationships: int = 5
