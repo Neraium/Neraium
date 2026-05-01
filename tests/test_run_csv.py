@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -5,8 +6,21 @@ from pathlib import Path
 SCRIPT = Path("tools/run_csv.py")
 SAMPLE_CSV = Path("examples/sample_cnc.csv")
 
+# Ensure the project root is on PYTHONPATH so subprocess can import neraium
+_PROJECT_ROOT = str(Path(__file__).parent.parent)
+_SUBPROCESS_ENV = {**os.environ, "PYTHONPATH": _PROJECT_ROOT}
+
 CONFIRMED_MESSAGES = ("CONFIRMED_CHANGE", "CONFIRMED_CHANGE_HELD")
 NOT_FOUND_MESSAGE = "No confirmed structural change found."
+
+
+def _run(*extra_args):
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--csv", str(SAMPLE_CSV), *extra_args],
+        capture_output=True,
+        text=True,
+        env=_SUBPROCESS_ENV,
+    )
 
 
 def test_script_exists():
@@ -18,47 +32,28 @@ def test_sample_csv_exists():
 
 
 def test_run_on_sample_csv_exits_successfully():
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--csv", str(SAMPLE_CSV)],
-        capture_output=True,
-        text=True,
-    )
+    result = _run()
     assert result.returncode == 0, f"Script failed:\n{result.stderr}"
 
 
 def test_output_contains_confirmed_or_not_found_message():
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--csv", str(SAMPLE_CSV)],
-        capture_output=True,
-        text=True,
-    )
-    output = result.stdout
+    output = _run().stdout
     found = any(msg in output for msg in CONFIRMED_MESSAGES) or NOT_FOUND_MESSAGE in output
     assert found, f"Expected confirmed or not-found message in output:\n{output}"
 
 
 def test_confirmed_output_names_spindle_pair():
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--csv", str(SAMPLE_CSV)],
-        capture_output=True,
-        text=True,
-    )
-    output = result.stdout
+    output = _run().stdout
     if NOT_FOUND_MESSAGE in output:
-        return  # nothing to assert
+        return
     assert "Spindle Vibration" in output
     assert "Spindle Motor Current" in output
 
 
 def test_known_columns_resolve_subsystem_and_component():
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--csv", str(SAMPLE_CSV)],
-        capture_output=True,
-        text=True,
-    )
-    output = result.stdout
+    output = _run().stdout
     if NOT_FOUND_MESSAGE in output:
-        return  # nothing to assert
+        return
     assert "Spindle assembly" in output
     assert "Spindle drive" in output
     assert "spindle_assembly" in output
@@ -67,19 +62,11 @@ def test_known_columns_resolve_subsystem_and_component():
 
 
 def test_max_rows_limits_processing():
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--csv", str(SAMPLE_CSV), "--max-rows", "10"],
-        capture_output=True,
-        text=True,
-    )
+    result = _run("--max-rows", "10")
     assert result.returncode == 0
     assert NOT_FOUND_MESSAGE in result.stdout
 
 
 def test_raw_engine_not_printed_by_default():
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--csv", str(SAMPLE_CSV)],
-        capture_output=True,
-        text=True,
-    )
-    assert "raw_engine" not in result.stdout
+    output = _run().stdout
+    assert "raw_engine" not in output
