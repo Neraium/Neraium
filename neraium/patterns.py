@@ -1,4 +1,5 @@
 RELATIONSHIP_DECAY = "RELATIONSHIP_DECAY"
+RELATIONSHIP_FORMATION = "RELATIONSHIP_FORMATION"
 LOAD_RESPONSE_MISMATCH = "LOAD_RESPONSE_MISMATCH"
 UNCONTROLLED_DIVERGENCE = "UNCONTROLLED_DIVERGENCE"
 RECOVERY_PATTERN = "RECOVERY_PATTERN"
@@ -53,6 +54,14 @@ def classify_pattern(scores, previous_scores=None, config=None):
         return _result(
             RELATIONSHIP_DECAY,
             "low_rel_stability_with_cov_shift",
+            scores,
+            0.75,
+        )
+
+    if rel_stability >= 1.25 and cov_shift >= 0.15:
+        return _result(
+            RELATIONSHIP_FORMATION,
+            "high_rel_stability_with_cov_shift",
             scores,
             0.75,
         )

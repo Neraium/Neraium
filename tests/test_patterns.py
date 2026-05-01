@@ -2,6 +2,7 @@ from neraium.patterns import (
     LOAD_RESPONSE_MISMATCH,
     RECOVERY_PATTERN,
     RELATIONSHIP_DECAY,
+    RELATIONSHIP_FORMATION,
     STRUCTURAL_CHANGE_UNCERTAIN,
     UNCONTROLLED_DIVERGENCE,
     classify_pattern,
@@ -21,6 +22,20 @@ def test_relationship_decay_scores_classify_as_relationship_decay():
     assert result["pattern"] == RELATIONSHIP_DECAY
     assert result["confidence_score"] == 0.75
     assert result["scores_at_classification"] is scores
+
+
+def test_relationship_formation_scores_classify_as_relationship_formation():
+    scores = {
+        "drift_score": 4.0,
+        "rel_stability": 1.3,
+        "cov_shift": 0.2,
+        "trajectory_pressure": 0.1,
+    }
+
+    result = classify_pattern(scores)
+
+    assert result["pattern"] == RELATIONSHIP_FORMATION
+    assert result["confidence_score"] == 0.75
 
 
 def test_high_drift_high_pressure_classifies_as_uncontrolled_divergence():
