@@ -129,6 +129,33 @@ def test_where_to_look_includes_spindle_context_for_sensor_0_and_sensor_1():
     }
 
 
+def test_top_signals_prioritizes_relationship_pair_over_contributor_rank():
+    engine_output = make_confirmed_output()
+    # Put an unrelated sensor first in contributor rank
+    engine_output["where"]["top_signals"] = [
+        {"signal": "sensor_2", "contribution": 0.6},
+        {"signal": "sensor_1", "contribution": 0.3},
+        {"signal": "sensor_0", "contribution": 0.1},
+    ]
+    result = build_operator_output(engine_output)
+
+    assert result["where"]["top_signals"] == [
+        "Spindle Vibration",
+        "Spindle Motor Current",
+    ]
+
+
+def test_top_signals_uses_contributor_rank_when_no_relationship_pair():
+    engine_output = make_confirmed_output()
+    engine_output["where"]["top_relationships"] = []
+    result = build_operator_output(engine_output)
+
+    assert result["where"]["top_signals"] == [
+        "Spindle Vibration",
+        "Spindle Motor Current",
+    ]
+
+
 def test_engineer_output_remains_raw_and_technical():
     result = build_engineer_output(
         {
