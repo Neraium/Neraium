@@ -30,6 +30,8 @@ def packet_for_cycle(cycle, rng):
 
 
 def _is_preferred(engine_output):
+    if engine_output.get("status") != "CONFIRMED_CHANGE":
+        return False
     pattern = engine_output.get("what_is_happening", {}).get("pattern")
     direction = engine_output.get("trajectory", {}).get("direction")
     relationships = engine_output.get("where", {}).get("top_relationships", [])
