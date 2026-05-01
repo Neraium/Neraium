@@ -227,7 +227,7 @@ function App() {
           signals = demoPacketStable(rng);
         }
         const ts = new Date().toISOString();
-        const packet = { asset_id: machine.id, signals, timestamp: ts };
+        const packet = { asset_id: machine.id, signals, cycle, timestamp: ts };
         const output = await postJson("/update", packet, base);
         machineCycles.current[machine.id] = cycle + 1;
         return { machineId: machine.id, cycle, output, signals, packet };
@@ -829,7 +829,7 @@ function EngineeringConsole({
 
       {/* Signal Charts */}
       <section className="eng-section">
-        <p className="label">Signal Charts · last {Math.min(history.length, 100)} samples</p>
+        <p className="label">Signal Charts · last {(signalHistory[SIGNAL_NAMES[0]] || []).length} samples</p>
         <div className="eng-charts-grid">
           {SIGNAL_NAMES.map((name) => {
             const vals = signalHistory[name] || [];
