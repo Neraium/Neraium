@@ -1,0 +1,13 @@
+[project]
+name = "neraium"
+version = "0.1.0"
+description = "Neraium structural evidence engine"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pytest"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
