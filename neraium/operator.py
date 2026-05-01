@@ -35,6 +35,11 @@ def build_operator_output(engine_output: dict) -> dict:
         },
         "trajectory": {
             "direction": trajectory.get("direction"),
+            "urgency": _trajectory_urgency(trajectory),
+        },
+        "if_ignored": {
+            "expected_behavior": _expected_behavior(trajectory.get("direction")),
+            "basis": "current trajectory direction and persistence",
         },
         "recommended_next_step": _recommended_next_step(status),
     }
@@ -58,3 +63,28 @@ def _recommended_next_step(status):
     if status == "CONFIRMED_CHANGE":
         return "INSPECT_TOP_SIGNALS_AND_RELATIONSHIPS"
     return "CONTINUE_MONITORING"
+
+
+def _trajectory_urgency(trajectory):
+    slopes = trajectory.get("recent_slopes", [])
+    if len(slopes) < 2:
+        return "low"
+
+    current_slope = float(trajectory.get("drift_velocity", 0.0))
+    percentile_rank = sum(float(slope) <= current_slope for slope in slopes) / len(slopes)
+
+    if percentile_rank >= 0.8:
+        return "high"
+    if percentile_rank >= 0.5:
+        return "medium"
+    return "low"
+
+
+def _expected_behavior(direction):
+    behavior = {
+        "diverging": "continued structural divergence",
+        "stabilizing": "structural stabilization likely if current trend continues",
+        "flat": "structural state likely to remain similar in near term",
+        "ambiguous": "trajectory unclear; additional observation required",
+    }
+    return behavior.get(direction, behavior["ambiguous"])

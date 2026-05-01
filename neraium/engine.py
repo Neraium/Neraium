@@ -16,6 +16,7 @@ class NeraiumEngine:
         self._max_window = 30
         self._max_history = 100
         self._confirmed_hold_remaining = 0
+        self._slope_history = []
 
     def update(self, packet):
         x = self._as_array(packet)
@@ -70,6 +71,12 @@ class NeraiumEngine:
         )
         pattern = classify_pattern(scores, previous_scores)
         trajectory = compute_trajectory_direction(self.history, scores)
+        self._slope_history.append(trajectory["drift_velocity"])
+        self._slope_history = self._slope_history[-50:]
+        trajectory = {
+            **trajectory,
+            "recent_slopes": list(self._slope_history),
+        }
 
         self.history.append(scores)
         self.history = self.history[-self._max_history:]
