@@ -76,9 +76,19 @@ def test_confirmed_output_contains_pattern_contributors_and_trajectory():
     assert confirmed is not None
     assert "pattern" in confirmed["what_is_happening"]
     assert "summary" in confirmed["what_is_happening"]
+    assert confirmed["relational_stability"] is not None
+    assert confirmed["covariance_drift"] is not None
+    assert confirmed["persistence_satisfied"] is True
+    assert "supporting_families" in confirmed
+    assert isinstance(confirmed["active_families"], int)
+    assert confirmed["rule_triggered"] == confirmed["what_is_happening"]["summary"]
     assert "top_signals" in confirmed["where"]
     assert "top_relationships" in confirmed["where"]
     assert "direction" in confirmed["trajectory"]
+    assert "drift_velocity" in confirmed["trajectory"]
+    assert "drift_acceleration" in confirmed["trajectory"]
+    assert "relational_recovery" in confirmed["trajectory"]
+    assert "cycles_of_evidence" in confirmed["trajectory"]
 
 
 def test_engine_holds_confirmed_state_when_evidence_dips():
@@ -105,5 +115,10 @@ def test_engine_holds_confirmed_state_when_evidence_dips():
     assert held is not None
     assert held["held"] is True
     assert held["hold_cycles_remaining"] > 0
+    assert held["relational_stability"] is not None
+    assert held["covariance_drift"] is not None
+    assert "supporting_families" in held
+    assert isinstance(held["active_families"], int)
+    assert held["rule_triggered"] == held["what_is_happening"]["summary"]
     assert "drift_score" in held
     assert "top_signals" in held["where"]

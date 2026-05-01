@@ -16,10 +16,11 @@ def build_engineer_output(engine_output: dict) -> dict:
         },
         "trajectory_metrics": {
             "direction": trajectory.get("direction"),
-            "drift_velocity": trajectory.get("velocity"),
-            "drift_acceleration": trajectory.get("acceleration"),
+            "drift_velocity": trajectory.get("drift_velocity"),
+            "drift_acceleration": trajectory.get("drift_acceleration"),
         },
         "evidence": {
+            "supporting_families": engine_output.get("supporting_families"),
             "active_families": engine_output.get("active_families"),
             "persistence_satisfied": engine_output.get(
                 "persistence_satisfied",

@@ -9,10 +9,16 @@ def make_engine_output():
         "covariance_drift": 0.8,
         "trajectory": {
             "direction": "diverging",
-            "velocity": 0.2,
-            "acceleration": 0.05,
+            "drift_velocity": 0.2,
+            "drift_acceleration": 0.05,
         },
-        "active_families": ["sensor_deviation", "relationship_shift"],
+        "supporting_families": {
+            "sensor_deviation": True,
+            "relationship_shift": True,
+            "relational_stability_change": False,
+            "trajectory_pressure": False,
+        },
+        "active_families": 2,
         "persistence_satisfied": True,
         "where": {
             "top_signals": [
@@ -54,7 +60,13 @@ def test_confirmed_returns_full_output():
             "drift_acceleration": 0.05,
         },
         "evidence": {
-            "active_families": ["sensor_deviation", "relationship_shift"],
+            "supporting_families": {
+                "sensor_deviation": True,
+                "relationship_shift": True,
+                "relational_stability_change": False,
+                "trajectory_pressure": False,
+            },
+            "active_families": 2,
             "persistence_satisfied": True,
         },
         "contributors": {
@@ -90,6 +102,7 @@ def test_missing_fields_are_none_or_default_false():
         "drift_acceleration": None,
     }
     assert result["evidence"] == {
+        "supporting_families": None,
         "active_families": None,
         "persistence_satisfied": False,
     }
