@@ -79,7 +79,16 @@ def build_operator_output(engine_output: dict, sensor_context=None) -> dict:
 
 def _top_signal_ids(contributors):
     signals = contributors.get("top_signals", [])
-    return [signal.get("signal") for signal in signals[:2]]
+    signal_ids = [s.get("signal") for s in signals]
+    relationships = contributors.get("top_relationships", [])
+    if relationships:
+        pair = relationships[0].get("pair", [])
+        prioritized = list(pair)
+        for sid in signal_ids:
+            if sid not in prioritized:
+                prioritized.append(sid)
+        return prioritized[:2]
+    return signal_ids[:2]
 
 
 def _top_relationship_pair_ids(contributors):
