@@ -7,6 +7,15 @@ PATTERN_SUMMARIES = {
     "STRUCTURAL_CHANGE_UNCERTAIN": "Structural change is confirmed, but the pattern is uncertain.",
 }
 
+PATTERN_MEANINGS = {
+    "RELATIONSHIP_FORMATION": "Signals are becoming more tightly coupled than normal",
+    "RELATIONSHIP_DECAY": "Signals are losing their normal coordination",
+    "LOAD_RESPONSE_MISMATCH": "System response is no longer aligning with operating conditions",
+    "UNCONTROLLED_DIVERGENCE": "System behavior is rapidly moving away from baseline",
+    "RECOVERY_PATTERN": "System behavior is moving back toward baseline",
+    "STRUCTURAL_CHANGE_UNCERTAIN": "System structure is changing in a way not yet clearly characterized",
+}
+
 
 def build_operator_output(engine_output: dict) -> dict:
     status = engine_output.get("status")
@@ -40,6 +49,14 @@ def build_operator_output(engine_output: dict) -> dict:
         "if_ignored": {
             "expected_behavior": _expected_behavior(trajectory.get("direction")),
             "basis": "current trajectory direction and persistence",
+        },
+        "why_it_matters": {
+            "meaning": PATTERN_MEANINGS.get(
+                pattern,
+                PATTERN_MEANINGS["STRUCTURAL_CHANGE_UNCERTAIN"],
+            ),
+            "implication": "current behavior may not remain consistent under the same conditions",
+            "not_claiming": "does not assert specific failure mode or timing",
         },
         "recommended_next_step": _recommended_next_step(status),
     }
