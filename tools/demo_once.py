@@ -14,9 +14,10 @@ CHANGE_START = 80
 def packet_for_cycle(cycle, rng):
     packet = rng.normal(0.0, 1.0, size=5)
     if cycle >= CHANGE_START:
-        shared = rng.normal(0.0, 1.0)
-        packet[0] = shared + 0.75 + 0.15 * rng.normal()
-        packet[1] = shared + 0.15 * rng.normal()
+        packet[2:] = rng.normal(0.0, 0.3, size=3)
+        shared = 1.5 * rng.normal(0.0, 1.0)
+        packet[0] = shared + 0.1
+        packet[1] = shared + 0.05 * rng.normal() + 0.1
     return packet
 
 

@@ -1,3 +1,4 @@
+from neraium.engineer import build_engineer_output
 from neraium.operator import build_operator_output
 
 
@@ -29,6 +30,7 @@ def make_confirmed_output(status="CONFIRMED_CHANGE"):
         "trajectory": {
             "direction": "diverging",
             "drift_velocity": 0.2,
+            "recent_slopes": [0.0, 0.1, 0.2],
             "drift_acceleration": 0.1,
             "relational_recovery": 0.0,
             "cycles_of_evidence": 5,
@@ -59,11 +61,39 @@ def test_confirmed_change_returns_full_structured_output_without_raw_math():
             "summary": "Previously weak signal relationships are strengthening.",
         },
         "where": {
-            "top_signals": ["sensor_0", "sensor_1"],
-            "top_relationship_pair": ["sensor_0", "sensor_1"],
+            "top_signals": ["Spindle Vibration", "Spindle Motor Current"],
+            "top_relationship_pair": [
+                "Spindle Vibration",
+                "Spindle Motor Current",
+            ],
+        },
+        "where_to_look": {
+            "subsystems": ["Spindle assembly", "Spindle drive"],
+            "components": ["spindle_assembly", "spindle_motor"],
+        },
+        "plain_english": {
+            "what_this_means": (
+                "Spindle Vibration and Spindle Motor Current are moving together more than normal."
+            ),
+            "where_to_start": (
+                "Start inspection around the Spindle assembly and Spindle drive."
+            ),
+            "what_we_are_not_claiming": (
+                "This does not identify an exact failed component without machine-specific topology and inspection context."
+            ),
         },
         "trajectory": {
             "direction": "diverging",
+            "urgency": "high",
+        },
+        "if_ignored": {
+            "expected_behavior": "continued structural divergence",
+            "basis": "current trajectory direction and persistence",
+        },
+        "why_it_matters": {
+            "meaning": "Signals are becoming more tightly coupled than normal",
+            "implication": "current behavior may not remain consistent under the same conditions",
+            "not_claiming": "does not assert specific failure mode or timing",
         },
         "recommended_next_step": "INSPECT_TOP_SIGNALS_AND_RELATIONSHIPS",
     }
@@ -75,3 +105,48 @@ def test_held_state_outputs_held_status_and_continue_monitoring_action():
 
     assert result["status"] == "CONFIRMED_CHANGE_HELD"
     assert result["recommended_next_step"] == "CONTINUE_MONITORING"
+
+
+def test_raw_sensor_ids_are_mapped_to_cnc_friendly_names():
+    result = build_operator_output(make_confirmed_output())
+
+    assert result["where"]["top_signals"] == [
+        "Spindle Vibration",
+        "Spindle Motor Current",
+    ]
+    assert result["where"]["top_relationship_pair"] == [
+        "Spindle Vibration",
+        "Spindle Motor Current",
+    ]
+
+
+def test_where_to_look_includes_spindle_context_for_sensor_0_and_sensor_1():
+    result = build_operator_output(make_confirmed_output())
+
+    assert result["where_to_look"] == {
+        "subsystems": ["Spindle assembly", "Spindle drive"],
+        "components": ["spindle_assembly", "spindle_motor"],
+    }
+
+
+def test_engineer_output_remains_raw_and_technical():
+    result = build_engineer_output(
+        {
+            **make_confirmed_output(),
+            "relational_stability": 1.4,
+            "covariance_drift": 0.8,
+            "supporting_families": {
+                "sensor_deviation": True,
+                "relationship_shift": True,
+            },
+            "active_families": 2,
+            "persistence_satisfied": True,
+            "rule_triggered": "high_rel_stability_with_cov_shift",
+        }
+    )
+
+    assert result["contributors"]["top_signals"][0]["signal"] == "sensor_0"
+    assert result["contributors"]["top_relationships"][0]["pair"] == [
+        "sensor_0",
+        "sensor_1",
+    ]
