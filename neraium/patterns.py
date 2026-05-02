@@ -1,3 +1,14 @@
+"""
+Structural pattern classification.
+
+All thresholds are expressed as relative quantities:
+  - drift thresholds are normalized by alert_threshold (1.0 = at alert level)
+  - relational_stability is a ratio vs baseline (1.0 = unchanged)
+  - covariance_shift is a fraction of baseline covariance scale
+
+No dataset-specific absolute values.
+"""
+
 RELATIONSHIP_DECAY = "RELATIONSHIP_DECAY"
 RELATIONSHIP_FORMATION = "RELATIONSHIP_FORMATION"
 LOAD_RESPONSE_MISMATCH = "LOAD_RESPONSE_MISMATCH"
@@ -19,13 +30,23 @@ def _result(pattern, rule_triggered, scores, confidence_score):
     }
 
 
-def classify_pattern(scores, previous_scores=None, config=None):
-    drift_score = _score(scores, "drift_score")
-    rel_stability = _score(scores, "rel_stability", 1.0)
-    cov_shift = _score(scores, "cov_shift")
+def classify_pattern(scores, previous_scores=None, config=None, alert_threshold: float = 1.0):
+    """
+    Classify the structural pattern.
+
+    alert_threshold: the engine's adaptive alert threshold; used to normalize
+    the raw drift score so pattern rules are dataset-agnostic.
+    """
+    raw_drift = _score(scores, "drift_score")
+    # Normalize drift by alert threshold so 1.0 = exactly at alert level.
+    norm_drift = raw_drift / max(float(alert_threshold), 1e-6)
+
+    # Accept both old (rel_stability/cov_shift) and new key names for compatibility
+    rel_stability = _score(scores, "relational_stability", _score(scores, "rel_stability", 1.0))
+    cov_shift = _score(scores, "covariance_shift", _score(scores, "cov_shift", 0.0))
     trajectory_pressure = _score(scores, "trajectory_pressure")
 
-    recent_history = []
+    # ── Recovery: sustained decline in drift + improving stability ─────────────
     if previous_scores is not None:
         recent_history = previous_scores.get("recent_history", [])
         recent_scores = (recent_history + [scores])[-5:]
@@ -37,8 +58,10 @@ def classify_pattern(scores, previous_scores=None, config=None):
                 0.65,
             )
 
+    # ── Uncontrolled divergence: very high normalized drift + all indicators ──
+    # norm_drift >= 1.6 → 60 % above alert threshold
     if (
-        drift_score >= 8.0
+        norm_drift >= 1.6
         and rel_stability <= 0.5
         and cov_shift >= 0.4
         and trajectory_pressure >= 0.7
@@ -50,6 +73,9 @@ def classify_pattern(scores, previous_scores=None, config=None):
             0.85,
         )
 
+    # ── Relationship decay: correlation structure weaker than baseline ─────────
+    # rel_stability < 0.75 → strength dropped to 75 % of baseline
+    # cov_shift > 0.15 → 15 % relative covariance change (already relative)
     if rel_stability <= 0.75 and cov_shift >= 0.15:
         return _result(
             RELATIONSHIP_DECAY,
@@ -58,6 +84,7 @@ def classify_pattern(scores, previous_scores=None, config=None):
             0.75,
         )
 
+    # ── Relationship formation: correlation structure stronger than baseline ───
     if rel_stability >= 1.25 and cov_shift >= 0.15:
         return _result(
             RELATIONSHIP_FORMATION,
@@ -66,11 +93,9 @@ def classify_pattern(scores, previous_scores=None, config=None):
             0.75,
         )
 
-    if (
-        drift_score >= 5.0
-        and trajectory_pressure >= 0.5
-        and cov_shift < 0.15
-    ):
+    # ── Load-response mismatch: drift elevated but no covariance change ────────
+    # norm_drift >= 1.0 → at or above alert threshold
+    if norm_drift >= 1.0 and trajectory_pressure >= 0.5 and cov_shift < 0.15:
         return _result(
             LOAD_RESPONSE_MISMATCH,
             "high_drift_high_trajectory_pressure_without_cov_shift",
@@ -87,16 +112,18 @@ def classify_pattern(scores, previous_scores=None, config=None):
 
 
 def _has_sustained_recovery(recent_scores):
-    drift_values = [_score(score, "drift_score") for score in recent_scores]
-    rel_values = [_score(score, "rel_stability", 1.0) for score in recent_scores]
+    drift_values = [_score(s, "drift_score") for s in recent_scores]
+    # Accept both new and old key names
+    rel_values = [
+        _score(s, "relational_stability", _score(s, "rel_stability", 1.0))
+        for s in recent_scores
+    ]
 
     drift_declines = sum(
-        current < previous
-        for previous, current in zip(drift_values, drift_values[1:])
+        cur < prev for prev, cur in zip(drift_values, drift_values[1:])
     )
     rel_improvements = sum(
-        current > previous
-        for previous, current in zip(rel_values, rel_values[1:])
+        cur > prev for prev, cur in zip(rel_values, rel_values[1:])
     )
     recent_peak = max(drift_values)
 

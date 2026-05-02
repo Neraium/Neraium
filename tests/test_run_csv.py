@@ -10,7 +10,7 @@ SAMPLE_CSV = Path("examples/sample_cnc.csv")
 _PROJECT_ROOT = str(Path(__file__).parent.parent)
 _SUBPROCESS_ENV = {**os.environ, "PYTHONPATH": _PROJECT_ROOT}
 
-CONFIRMED_MESSAGES = ("CONFIRMED_CHANGE", "CONFIRMED_CHANGE_HELD")
+CONFIRMED_MESSAGES = ("ALERT", "ALERT_HELD")
 NOT_FOUND_MESSAGE = "No confirmed structural change found."
 
 
@@ -54,10 +54,9 @@ def test_known_columns_resolve_subsystem_and_component():
     output = _run().stdout
     if NOT_FOUND_MESSAGE in output:
         return
-    assert "Spindle assembly" in output
-    assert "Spindle drive" in output
-    assert "spindle_assembly" in output
-    assert "spindle_motor" in output
+    # Generic context: subsystem and component are the raw column names
+    assert "spindle_vibration" in output
+    assert "spindle_motor_current" in output
     assert "unknown" not in output
 
 

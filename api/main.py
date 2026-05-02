@@ -111,7 +111,7 @@ def update(body: UpdateRequest):
         ),
     }
 
-    if status in ("CONFIRMED_CHANGE", "CONFIRMED_CHANGE_HELD"):
+    if status in ("ALERT", "ALERT_HELD"):
         open_events = [
             e for e in _events if e["machine_id"] == machine_id and e["status"] == "open"
         ]

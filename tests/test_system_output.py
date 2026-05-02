@@ -1,20 +1,27 @@
 from neraium.system_output import build_system_output
 
 
-def make_engine_output(status="CONFIRMED_CHANGE"):
+def make_engine_output(status="ALERT"):
     return {
         "status": status,
         "confidence_score": 0.75,
         "drift_score": 12.5,
+        "structural_drift_score": 12.5,
         "relational_stability": 1.4,
+        "relational_stability_score": 0.6,
+        "covariance_shift": 0.8,
         "covariance_drift": 0.8,
+        "watch_threshold": 2.0,
+        "alert_threshold": 4.0,
+        "evidence_count": 3,
+        "time_in_state": 2,
         "supporting_families": {
             "sensor_deviation": True,
             "relationship_shift": True,
             "relational_stability_change": False,
             "trajectory_pressure": False,
         },
-        "active_families": 2,
+        "active_families": ["sensor_deviation", "relationship_shift"],
         "persistence_satisfied": True,
         "what_is_happening": {
             "pattern": "RELATIONSHIP_FORMATION",
@@ -44,35 +51,30 @@ def make_engine_output(status="CONFIRMED_CHANGE"):
             "cycles_of_evidence": 5,
             "recent_slopes": [0.0, 0.1, 0.2],
         },
+        "drift_velocity": 0.2,
         "rule_triggered": "high_rel_stability_with_cov_shift",
     }
 
 
-def test_transient_input_returns_all_views_as_transient():
-    engine_output = {"status": "TRANSIENT", "drift_score": 3.0}
-
+def test_watch_input_returns_all_views_as_watch():
+    engine_output = {"status": "WATCH", "drift_score": 3.0}
     result = build_system_output(engine_output)
+    assert result["operator"]["status"] == "WATCH"
+    assert result["engineer"]["status"] == "WATCH"
+    assert result["raw_engine"]["status"] == "WATCH"
 
-    assert result["operator"]["status"] == "TRANSIENT"
-    assert result["engineer"]["status"] == "TRANSIENT"
-    assert result["raw_engine"]["status"] == "TRANSIENT"
 
-
-def test_confirmed_change_returns_all_views_and_raw_engine_identity():
+def test_alert_returns_all_views_and_raw_engine_identity():
     engine_output = make_engine_output()
-
     result = build_system_output(engine_output)
-
     assert "what_is_happening" in result["operator"]
     assert "structural_metrics" in result["engineer"]
     assert result["raw_engine"] is engine_output
 
 
-def test_confirmed_change_held_returns_held_status_in_all_views():
-    engine_output = make_engine_output("CONFIRMED_CHANGE_HELD")
-
+def test_alert_held_returns_held_status_in_all_views():
+    engine_output = make_engine_output("ALERT_HELD")
     result = build_system_output(engine_output)
-
-    assert result["operator"]["status"] == "CONFIRMED_CHANGE_HELD"
-    assert result["engineer"]["status"] == "CONFIRMED_CHANGE_HELD"
-    assert result["raw_engine"]["status"] == "CONFIRMED_CHANGE_HELD"
+    assert result["operator"]["status"] == "ALERT_HELD"
+    assert result["engineer"]["status"] == "ALERT_HELD"
+    assert result["raw_engine"]["status"] == "ALERT_HELD"

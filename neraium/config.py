@@ -1,21 +1,31 @@
 from dataclasses import dataclass
 
+
 @dataclass
 class NeraiumConfig:
-    mad_scale: float = 1.4826
-    drift_threshold: float = 5.0
-    persistence_cycles: int = 5
+    # ── Baseline collection ───────────────────────────────────────────────────
+    baseline_window: int = 50       # observations collected before engine activates
+    mad_scale: float = 1.4826       # MAD → sigma equivalence (consistency constant)
 
-    sensor_threshold: float = 2.0
-    cov_shift_threshold: float = 0.15
-    rel_stability_threshold: float = 0.75
+    # ── Adaptive threshold multipliers ────────────────────────────────────────
+    # Thresholds are derived from the baseline drift distribution:
+    #   threshold = baseline_drift_median + multiplier × baseline_drift_MAD × mad_scale
+    watch_mad_multiplier: float = 3.0    # WATCH  = median + 3 × MAD_scaled
+    alert_mad_multiplier: float = 5.0    # ALERT  = median + 5 × MAD_scaled
 
-    dmd_min_window: int = 20
-    trajectory_threshold: float = 0.3
+    # ── Persistence gate (K-of-W rolling window) ──────────────────────────────
+    persistence_window: int = 5          # W: rolling window of recent cycles
+    persistence_min_hits: int = 3        # K: minimum cycles above alert threshold
 
+    # ── Alert hold (prevent thrashing on brief evidence recovery) ─────────────
+    alert_hold_cycles: int = 5
+
+    # ── Numerical stability ───────────────────────────────────────────────────
     cov_epsilon: float = 1e-6
 
+    # ── Contributors ─────────────────────────────────────────────────────────
     top_n: int = 3
     top_n_relationships: int = 5
 
-    confirmed_hold_cycles: int = 5
+    # ── DMD spectral window (placeholder, not yet active) ────────────────────
+    dmd_min_window: int = 20

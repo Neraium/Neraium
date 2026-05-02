@@ -84,7 +84,7 @@ def test_machines_includes_status_fields():
 
 def test_engines_do_not_leak_between_machines():
     """Advancing CNC-01 past init should not affect CNC-02."""
-    for _ in range(35):
+    for _ in range(55):
         client.post("/update", json={"asset_id": "CNC-01", "signals": SIGNALS_NORMAL})
 
     response = client.post("/update", json={"asset_id": "CNC-02", "signals": SIGNALS_NORMAL})
@@ -93,7 +93,7 @@ def test_engines_do_not_leak_between_machines():
 
 def test_reset_one_machine_does_not_reset_other():
     """Resetting CNC-01 must not touch CNC-02's engine."""
-    for _ in range(35):
+    for _ in range(55):
         client.post("/update", json={"asset_id": "CNC-01", "signals": SIGNALS_NORMAL})
         client.post("/update", json={"asset_id": "CNC-02", "signals": SIGNALS_NORMAL})
 
@@ -107,7 +107,7 @@ def test_reset_one_machine_does_not_reset_other():
 
 
 def test_reset_all_clears_every_engine():
-    for _ in range(35):
+    for _ in range(55):
         client.post("/update", json={"asset_id": "CNC-01", "signals": SIGNALS_NORMAL})
         client.post("/update", json={"asset_id": "CNC-02", "signals": SIGNALS_NORMAL})
 

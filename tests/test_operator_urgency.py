@@ -3,7 +3,7 @@ from neraium.operator import build_operator_output
 
 def engine_output_with_slope(current_slope, recent_slopes):
     return {
-        "status": "CONFIRMED_CHANGE",
+        "status": "ALERT",
         "confidence_score": 0.75,
         "what_is_happening": {
             "pattern": "RELATIONSHIP_FORMATION",
@@ -25,7 +25,6 @@ def test_high_slope_vs_history_maps_to_high_urgency():
     result = build_operator_output(
         engine_output_with_slope(0.5, [0.1, 0.2, 0.3, 0.4, 0.5])
     )
-
     assert result["trajectory"]["urgency"] == "high"
 
 
@@ -33,7 +32,6 @@ def test_medium_slope_vs_history_maps_to_medium_urgency():
     result = build_operator_output(
         engine_output_with_slope(0.3, [0.1, 0.2, 0.3, 0.4, 0.5])
     )
-
     assert result["trajectory"]["urgency"] == "medium"
 
 
@@ -41,11 +39,15 @@ def test_low_slope_vs_history_maps_to_low_urgency():
     result = build_operator_output(
         engine_output_with_slope(0.1, [0.1, 0.2, 0.3, 0.4, 0.5])
     )
-
     assert result["trajectory"]["urgency"] == "low"
 
 
-def test_insufficient_slope_history_maps_to_low_urgency():
-    result = build_operator_output(engine_output_with_slope(0.5, [0.5]))
+def test_no_slope_history_with_positive_slope_maps_to_medium_urgency():
+    # No recent_slopes but current slope > 0.01 → medium
+    result = build_operator_output(engine_output_with_slope(0.05, []))
+    assert result["trajectory"]["urgency"] == "medium"
 
+
+def test_no_slope_history_with_flat_slope_maps_to_low_urgency():
+    result = build_operator_output(engine_output_with_slope(0.005, []))
     assert result["trajectory"]["urgency"] == "low"

@@ -56,7 +56,7 @@ def test_reset_returns_reset_status():
 
 
 def test_reset_clears_engine_state():
-    for _ in range(35):
+    for _ in range(55):
         client.post("/update", json={"asset_id": "cnc_01", "signals": SIGNALS})
 
     client.post("/reset")

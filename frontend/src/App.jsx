@@ -155,15 +155,15 @@ async function doReset(base, machineId = null) {
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function statusTone(status, urgency) {
-  if (status === "CONFIRMED_CHANGE" || status === "CONFIRMED_CHANGE_HELD")
+  if (status === "ALERT" || status === "ALERT_HELD")
     return urgency === "high" ? "critical" : "active";
-  if (status === "TRANSIENT") return "quiet";
+  if (status === "WATCH") return "quiet";
   return "initializing";
 }
 
 function statusBarClass(status) {
-  if (status === "CONFIRMED_CHANGE" || status === "CONFIRMED_CHANGE_HELD") return "confirmed";
-  if (status === "TRANSIENT") return "transient";
+  if (status === "ALERT" || status === "ALERT_HELD") return "confirmed";
+  if (status === "WATCH") return "transient";
   return "initializing";
 }
 
@@ -282,11 +282,11 @@ function App() {
         const milestones = { ...pm };
         if (milestones.baselineFormed === null && newStatus !== "INITIALIZING")
           milestones.baselineFormed = cycle;
-        if (milestones.firstDeviation === null && newStatus === "TRANSIENT")
+        if (milestones.firstDeviation === null && newStatus === "WATCH")
           milestones.firstDeviation = cycle;
         if (
           milestones.firstConfirmed === null &&
-          (newStatus === "CONFIRMED_CHANGE" || newStatus === "CONFIRMED_CHANGE_HELD")
+          (newStatus === "ALERT" || newStatus === "ALERT_HELD")
         )
           milestones.firstConfirmed = cycle;
         const stateStartCycle =
@@ -413,7 +413,7 @@ function App() {
   useEffect(() => {
     if (
       selectedMachineId &&
-      (selectedStatus === "CONFIRMED_CHANGE" || selectedStatus === "CONFIRMED_CHANGE_HELD")
+      (selectedStatus === "ALERT" || selectedStatus === "ALERT_HELD")
     ) {
       fetchEvents(selectedMachineId);
     }
@@ -436,8 +436,8 @@ function App() {
   const history = selectedData?.history || [];
   const firstConfirmedIdx = history.findIndex(
     (h) =>
-      h.output.operator?.status === "CONFIRMED_CHANGE" ||
-      h.output.operator?.status === "CONFIRMED_CHANGE_HELD"
+      h.output.operator?.status === "ALERT" ||
+      h.output.operator?.status === "ALERT_HELD"
   );
 
   const demoCtrl = {
@@ -802,7 +802,7 @@ function MainAlertCard({ operator, engineer, status, urgency, direction, machine
     operator.plain_english?.what_this_means ||
     "Collecting baseline data. Establishing normal operating behaviour.";
   const recommendedAction = operator.recommended_next_step || "CONTINUE_MONITORING";
-  const isConfirmed = status === "CONFIRMED_CHANGE" || status === "CONFIRMED_CHANGE_HELD";
+  const isConfirmed = status === "ALERT" || status === "ALERT_HELD";
   const tone = statusTone(status, urgency);
 
   return (
@@ -977,7 +977,7 @@ function UrgencyExplanation({ operator, engineer }) {
   const persisted = evidence.persistence_satisfied;
   const drift = metrics.drift_score;
   const isConfirmed =
-    operator.status === "CONFIRMED_CHANGE" || operator.status === "CONFIRMED_CHANGE_HELD";
+    operator.status === "ALERT" || operator.status === "ALERT_HELD";
 
   if (!isConfirmed) {
     return (
@@ -1052,7 +1052,7 @@ function EnhancedRelationshipMap({ operator, engineer, status }) {
 
   const activePair = topRel?.pair || [];
   const covShift = topRel?.covariance_shift_norm ?? 0;
-  const confirmed = status === "CONFIRMED_CHANGE" || status === "CONFIRMED_CHANGE_HELD";
+  const confirmed = status === "ALERT" || status === "ALERT_HELD";
   const intensity = confirmed ? Math.min(1, Math.max(0.4, covShift / 1.4)) : 0;
   const activeStrokeW = 2 + intensity * 9;
 
@@ -1296,7 +1296,7 @@ function DemoControlsSection({
 
 function IncidentPanel({ openEvent, status, noteInput, setNoteInput, onAcknowledge, onAddNote, onClose, onBrief }) {
   const hasEvent = !!openEvent;
-  const isConfirmed = status === "CONFIRMED_CHANGE" || status === "CONFIRMED_CHANGE_HELD";
+  const isConfirmed = status === "ALERT" || status === "ALERT_HELD";
 
   return (
     <section className="v4-panel incident-panel">

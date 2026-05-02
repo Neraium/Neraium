@@ -1,8 +1,26 @@
+"""
+Trajectory direction computation.
+
+Computes drift velocity and acceleration over recent history to characterize
+whether the structural state is diverging, stabilizing, or flat.
+"""
+
 import numpy as np
 
 
 def compute_trajectory_direction(history, current):
-    cycles_of_evidence = len(history) + 1
+    """
+    Compute trajectory direction from a list of score dicts.
+
+    history: list of dicts, each with at least 'drift_score' and
+             'relational_stability' keys (most-recent last).
+    current: dict for the current timestep.
+
+    Returns a dict with direction, drift_velocity, drift_acceleration,
+    relational_recovery, cycles_of_evidence.
+    """
+    all_points = list(history) + [current]
+    cycles_of_evidence = len(all_points)
 
     if cycles_of_evidence < 5:
         return {
@@ -13,21 +31,24 @@ def compute_trajectory_direction(history, current):
             "cycles_of_evidence": cycles_of_evidence,
         }
 
-    points = (history + [current])[-5:]
-    drift_values = np.array([point["drift_score"] for point in points], dtype=float)
-    rel_values = np.array([point["rel_stability"] for point in points], dtype=float)
+    points = all_points[-5:]
+    drift_values = np.array(
+        [float(p.get("drift_score", 0.0)) for p in points], dtype=float
+    )
+    rel_values = np.array(
+        # Accept both new and old key names
+        [float(p.get("relational_stability", p.get("rel_stability", 1.0))) for p in points],
+        dtype=float,
+    )
     x = np.arange(len(points), dtype=float)
 
     drift_velocity = float(np.polyfit(x, drift_values, 1)[0])
     relational_recovery = float(np.polyfit(x, rel_values, 1)[0])
 
-    drift_acceleration = 0.0
-    if len(points) >= 5:
-        first_half_x = np.arange(3, dtype=float)
-        second_half_x = np.arange(3, dtype=float)
-        first_half_slope = np.polyfit(first_half_x, drift_values[:3], 1)[0]
-        second_half_slope = np.polyfit(second_half_x, drift_values[2:], 1)[0]
-        drift_acceleration = float(second_half_slope - first_half_slope)
+    # Acceleration: change in slope from first half to second half
+    first_slope = float(np.polyfit(np.arange(3, dtype=float), drift_values[:3], 1)[0])
+    second_slope = float(np.polyfit(np.arange(3, dtype=float), drift_values[2:], 1)[0])
+    drift_acceleration = second_slope - first_slope
 
     if drift_velocity > 0.01:
         direction = "diverging"
