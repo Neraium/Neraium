@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -79,16 +79,43 @@ function actionWindow(trajectory, evidence) {
   return { window, confidence, basis };
 }
 
+function demoPhaseLabel(cycle) {
+  if (cycle < BASELINE_N) return `Baseline (${cycle}/${BASELINE_N})`;
+  if (cycle < 70) return "Stable";
+  return `Coupling active (+${cycle - 70})`;
+}
+
 function emptyMachine() {
   return {
     out: { operator: { status: "INITIALIZING" }, engineer: { status: "INITIALIZING" } },
     cycle: 0,
     history: [],            // [{cycle, status}]
+    driftHistory: [],       // [{cycle, drift, watch, alert}]
     sigHistory: Object.fromEntries(SIGNAL_NAMES.map(n => [n, []])), // last 120
     lastSigs: null,
     milestones: { baselineFormed: null, firstWatch: null, firstAlert: null },
     lastStatus: "INITIALIZING",
   };
+}
+
+// ── Correlation matrix from signal history ────────────────────────────────────
+
+function computeCorrMatrix(sigHistory, n = 30) {
+  const cols = SIGNAL_NAMES.map(name => (sigHistory?.[name] || []).slice(-n));
+  const minLen = Math.min(...cols.map(c => c.length));
+  if (minLen < 2) return null;
+  const data = cols.map(c => c.slice(-minLen));
+  const means = data.map(d => d.reduce((s, v) => s + v, 0) / minLen);
+  return data.map((di, i) => data.map((dj, j) => {
+    if (i === j) return 1;
+    let sxy = 0, sxx = 0, syy = 0;
+    for (let k = 0; k < minLen; k++) {
+      sxy += (di[k] - means[i]) * (dj[k] - means[j]);
+      sxx += (di[k] - means[i]) ** 2;
+      syy += (dj[k] - means[j]) ** 2;
+    }
+    return sxx > 0 && syy > 0 ? sxy / Math.sqrt(sxx * syy) : 0;
+  }));
 }
 
 // ── Covariance ellipse math (canvas) ─────────────────────────────────────────
@@ -395,17 +422,261 @@ function OperatorPanel({ operator, engineer, onHoverSignal }) {
   );
 }
 
+// ── Sparkline ─────────────────────────────────────────────────────────────────
+
+function Sparkline({ values, color = "#4682c8", height = 32 }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas || values.length < 2) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = height * dpr;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    const W = rect.width, H = height;
+    ctx.clearRect(0, 0, W, H);
+    const mn = Math.min(...values), mx = Math.max(...values);
+    const range = mx - mn || 1;
+    const toX = i => (i / (values.length - 1)) * W;
+    const toY = v => H - ((v - mn) / range) * (H - 4) - 2;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    values.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
+    ctx.stroke();
+    // fill under
+    ctx.lineTo(toX(values.length - 1), H);
+    ctx.lineTo(toX(0), H);
+    ctx.closePath();
+    ctx.fillStyle = color.replace(")", ",0.12)").replace("rgb", "rgba");
+    ctx.fill();
+  }, [values, color, height]);
+  return <canvas ref={ref} style={{ width: "100%", height, display: "block" }} />;
+}
+
+// ── DriftChart ────────────────────────────────────────────────────────────────
+
+function DriftChart({ driftHistory, milestones }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    const W = rect.width, H = rect.height;
+    ctx.fillStyle = "#060a1a";
+    ctx.fillRect(0, 0, W, H);
+
+    if (!driftHistory || driftHistory.length < 2) {
+      ctx.fillStyle = "#3a4a6a";
+      ctx.font = "12px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Collecting data…", W / 2, H / 2);
+      return;
+    }
+
+    const mg = { l: 46, r: 16, t: 28, b: 32 };
+    const pw = W - mg.l - mg.r, ph = H - mg.t - mg.b;
+    const maxWatch = Math.max(...driftHistory.map(d => d.watch || 0));
+    const maxAlert = Math.max(...driftHistory.map(d => d.alert || 0));
+    const maxDrift = Math.max(...driftHistory.map(d => d.drift || 0));
+    const yMax = Math.max(maxDrift, maxAlert) * 1.15 || 1;
+    const n = driftHistory.length;
+    const toX = i => mg.l + (i / (n - 1)) * pw;
+    const toY = v => mg.t + ph - (v / yMax) * ph;
+
+    // Grid lines
+    ctx.strokeStyle = "#1a2540"; ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const y = mg.t + (i / 4) * ph;
+      ctx.beginPath(); ctx.moveTo(mg.l, y); ctx.lineTo(mg.l + pw, y); ctx.stroke();
+    }
+
+    // Threshold zones
+    if (maxWatch > 0) {
+      ctx.fillStyle = "rgba(255,184,77,0.06)";
+      ctx.fillRect(mg.l, toY(maxAlert), pw, toY(maxWatch) - toY(maxAlert));
+      ctx.fillStyle = "rgba(240,68,68,0.06)";
+      ctx.fillRect(mg.l, mg.t, pw, toY(maxAlert) - mg.t);
+    }
+
+    // Watch threshold line
+    if (maxWatch > 0) {
+      const yw = toY(maxWatch);
+      ctx.setLineDash([6, 4]); ctx.strokeStyle = "rgba(255,184,77,0.6)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(mg.l, yw); ctx.lineTo(mg.l + pw, yw); ctx.stroke();
+      ctx.fillStyle = "rgba(255,184,77,0.8)"; ctx.font = "10px sans-serif"; ctx.textAlign = "right";
+      ctx.fillText("WATCH", mg.l - 4, yw + 3);
+    }
+    // Alert threshold line
+    if (maxAlert > 0) {
+      const ya = toY(maxAlert);
+      ctx.setLineDash([6, 4]); ctx.strokeStyle = "rgba(240,68,68,0.7)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(mg.l, ya); ctx.lineTo(mg.l + pw, ya); ctx.stroke();
+      ctx.fillStyle = "rgba(240,68,68,0.8)"; ctx.textAlign = "right";
+      ctx.fillText("ALERT", mg.l - 4, ya + 3);
+    }
+    ctx.setLineDash([]);
+
+    // Milestone verticals
+    const msCycles = [
+      { cycle: milestones?.firstWatch, color: "rgba(255,184,77,0.4)", label: "W" },
+      { cycle: milestones?.firstAlert, color: "rgba(240,68,68,0.5)", label: "A" },
+    ];
+    msCycles.forEach(({ cycle, color, label }) => {
+      if (cycle == null) return;
+      const idx = driftHistory.findIndex(d => d.cycle >= cycle);
+      if (idx < 0) return;
+      const x = toX(idx);
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(x, mg.t); ctx.lineTo(x, mg.t + ph); ctx.stroke();
+      ctx.fillStyle = color; ctx.font = "bold 10px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText(label, x, mg.t - 4);
+    });
+
+    // Drift line
+    ctx.strokeStyle = "#7aacec"; ctx.lineWidth = 2; ctx.lineJoin = "round";
+    ctx.beginPath();
+    driftHistory.forEach((d, i) => {
+      const x = toX(i), y = toY(d.drift || 0);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Fill under drift line
+    ctx.lineTo(toX(n - 1), mg.t + ph);
+    ctx.lineTo(mg.l, mg.t + ph);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(70,130,200,0.1)";
+    ctx.fill();
+
+    // X axis labels
+    ctx.fillStyle = "#4a6a88"; ctx.font = "10px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(`cycle ${driftHistory[0].cycle}`, mg.l, mg.t + ph + 18);
+    ctx.fillText(`cycle ${driftHistory[n - 1].cycle}`, mg.l + pw, mg.t + ph + 18);
+
+    // Title
+    ctx.fillStyle = "#a3c4e0"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "left";
+    ctx.fillText("Structural Drift Score", mg.l, 18);
+  }, [driftHistory, milestones]);
+
+  return (
+    <div className="drift-chart-wrap">
+      <canvas ref={ref} style={{ width: "100%", height: "100%", display: "block" }} />
+    </div>
+  );
+}
+
+// ── CorrelationHeatmap ────────────────────────────────────────────────────────
+
+function CorrelationHeatmap({ sigHistory }) {
+  const corr = computeCorrMatrix(sigHistory);
+  const SHORT = ["SV", "SMC", "CF", "ASL", "CZT"];
+
+  function cellColor(v) {
+    if (v === null) return "#162035";
+    const a = Math.abs(v);
+    if (v > 0) return `rgba(70,130,200,${0.1 + 0.75 * a})`;
+    return `rgba(220,80,60,${0.1 + 0.75 * a})`;
+  }
+
+  return (
+    <div className="panel heatmap-panel">
+      <h3 className="panel-title">Current Correlation</h3>
+      <div className="heatmap-grid">
+        <div className="hm-corner" />
+        {SHORT.map(s => <div key={s} className="hm-label hm-col-label">{s}</div>)}
+        {SIGNAL_NAMES.map((_, i) => (
+          <>
+            <div key={`row-${i}`} className="hm-label hm-row-label">{SHORT[i]}</div>
+            {SIGNAL_NAMES.map((__, j) => {
+              const v = corr ? corr[i][j] : null;
+              return (
+                <div
+                  key={`${i}-${j}`}
+                  className="hm-cell"
+                  style={{ background: cellColor(v) }}
+                  title={v != null ? `${SHORT[i]} × ${SHORT[j]}: ${v.toFixed(3)}` : ""}
+                >
+                  {i !== j && v != null ? (
+                    <span className="hm-val">{v.toFixed(2)}</span>
+                  ) : i === j ? (
+                    <span className="hm-diag">1</span>
+                  ) : null}
+                </div>
+              );
+            })}
+          </>
+        ))}
+      </div>
+      <div className="hm-legend">
+        <span className="hm-neg">neg</span>
+        <div className="hm-grad" />
+        <span className="hm-pos">pos</span>
+      </div>
+    </div>
+  );
+}
+
+// ── MilestonesRow ─────────────────────────────────────────────────────────────
+
+function MilestonesRow({ milestones }) {
+  const { baselineFormed, firstWatch, firstAlert } = milestones || {};
+  const items = [
+    { label: "Baseline formed", cycle: baselineFormed, color: "#4682c8" },
+    { label: "First Watch",     cycle: firstWatch,     color: "#ffb84d" },
+    { label: "First Alert",     cycle: firstAlert,     color: "#f04444" },
+  ];
+  return (
+    <div className="milestones-row">
+      {items.map(({ label, cycle, color }) => (
+        <div key={label} className="milestone-item">
+          <span className="ms-dot" style={{ background: cycle != null ? color : "#2a3a5a" }} />
+          <span className="ms-label">{label}</span>
+          <span className="ms-cycle" style={{ color: cycle != null ? color : "#3a4a6a" }}>
+            {cycle != null ? `cycle ${cycle}` : "—"}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── ConfidenceBar ─────────────────────────────────────────────────────────────
+
+function ConfidenceBar({ value }) {
+  const pct = Math.round((value || 0) * 100);
+  const color = pct >= 80 ? "#4ade80" : pct >= 50 ? "#ffb84d" : "#4682c8";
+  return (
+    <div className="conf-bar-wrap">
+      <div className="conf-bar-track">
+        <div className="conf-bar-fill" style={{ width: `${pct}%`, background: color }} />
+      </div>
+      <span className="conf-bar-label" style={{ color }}>{pct}%</span>
+    </div>
+  );
+}
+
 // ── TelemetryStrip ────────────────────────────────────────────────────────────
 
-function TelemetryStrip({ sigs }) {
+function TelemetryStrip({ sigs, sigHistory }) {
   return (
     <div className="telemetry-strip">
       {SIGNAL_NAMES.map(name => {
         const v = sigs?.[name];
+        const hist = (sigHistory?.[name] || []).slice(-40);
         return (
           <div key={name} className="telem-cell">
             <div className="telem-name">{SIGNAL_LABELS[name]}</div>
             <div className="telem-val">{v != null ? fmt(v, 3) : "—"}</div>
+            {hist.length >= 2 && <Sparkline values={hist} color="#4682c8" height={28} />}
           </div>
         );
       })}
@@ -589,12 +860,15 @@ function MachineCard({ machine, data, onSelect }) {
 
 function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, onClose }) {
   const [hover, setHover] = useState(null);
-  const op = data?.out?.operator || {};
+  const op  = data?.out?.operator || {};
   const eng = data?.out?.engineer || {};
   const status = op.status || "INITIALIZING";
+  const timeInState = eng?.evidence?.time_in_state;
+  const confidence  = eng?.evidence?.confidence_score;
+  const phase = machineId === "CNC-01" ? demoPhaseLabel(data?.cycle ?? 0) : null;
 
   return (
-    <div className="detail-view">
+    <div className={`detail-view ${status === "ALERT" || status === "ALERT_HELD" ? "state-alert-active" : ""}`}>
       {/* Header */}
       <div className="detail-header">
         <button className="back-btn" onClick={onBack}>← Floor</button>
@@ -603,9 +877,18 @@ function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, o
           <span className="dh-sub">CNC Manufacturing Cell · {machine.type}</span>
           <span className="dh-tag">Live Structural Intelligence</span>
         </div>
-        <StatusBadge status={status} />
-        <div className="dh-cycle muted">Cycle {data?.cycle ?? 0}</div>
+        <div className="dh-right">
+          <StatusBadge status={status} />
+          {timeInState != null && (
+            <span className="time-in-state muted">{timeInState}c in state</span>
+          )}
+          {phase && <span className="demo-phase">{phase}</span>}
+          <div className="dh-cycle muted">Cycle {data?.cycle ?? 0}</div>
+        </div>
       </div>
+
+      {/* Milestones */}
+      <MilestonesRow milestones={data?.milestones} />
 
       {/* Main grid */}
       <div className="detail-grid">
@@ -616,6 +899,7 @@ function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, o
             <StructuralMetricsPanel engineer={eng} />
             <EvidenceFamiliesPanel engineer={eng} />
           </div>
+          <CorrelationHeatmap sigHistory={data?.sigHistory} />
           <div className="note-banner">
             No individual signal threshold is required. Neraium detects structural relationship change.
           </div>
@@ -623,6 +907,7 @@ function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, o
 
         {/* Right column */}
         <div className="right-col">
+          {confidence != null && <ConfidenceBar value={confidence} />}
           <OperatorPanel operator={op} engineer={eng} onHoverSignal={setHover} />
           <EventsPanel
             machineId={machineId}
@@ -634,8 +919,11 @@ function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, o
         </div>
       </div>
 
+      {/* Drift chart */}
+      <DriftChart driftHistory={data?.driftHistory} milestones={data?.milestones} />
+
       {/* Telemetry + timeline */}
-      <TelemetryStrip sigs={data?.lastSigs} />
+      <TelemetryStrip sigs={data?.lastSigs} sigHistory={data?.sigHistory} />
       <StateTimeline history={data?.history || []} />
 
       {/* Engineer drawer */}
@@ -678,6 +966,22 @@ export default function App() {
 
   useEffect(() => () => stopDemo(), []);
 
+  const runningRef = useRef(running);
+  useEffect(() => { runningRef.current = running; }, [running]);
+
+  // Spacebar → toggle start/stop
+  useEffect(() => {
+    function onKey(e) {
+      if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+      if (e.code === "Space") {
+        e.preventDefault();
+        if (runningRef.current) stopDemo(); else startDemo();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   async function sendCycle() {
     const base = apiRef.current;
     const results = await Promise.all(MACHINES.map(async m => {
@@ -719,10 +1023,19 @@ export default function App() {
           n, [...(p.sigHistory[n] || []), sigs[n] ?? 0].slice(-120),
         ]));
 
+        const sm = out?.engineer?.structural_metrics || {};
+        const driftEntry = {
+          cycle: c,
+          drift: sm.structural_drift_score ?? sm.drift_score ?? 0,
+          watch: sm.watch_threshold ?? 0,
+          alert: sm.alert_threshold ?? 0,
+        };
+
         next[id] = {
           out,
           cycle: c + 1,
           history: [...p.history, { cycle: c, status }].slice(-100),
+          driftHistory: [...(p.driftHistory || []), driftEntry].slice(-150),
           sigHistory: newSigH,
           lastSigs: sigs,
           milestones: ms,

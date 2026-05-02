@@ -186,6 +186,52 @@ input:focus,select:focus{outline:none;border-color:var(--blue)}
 .rel-shift{color:var(--blue2);font-family:"Courier New",monospace}
 .pattern-type{font-size:.92rem;color:var(--blue2);font-family:"Courier New",monospace}
 
+/* ── Drift chart ────────────────────────────────────────────────────────────── */
+.drift-chart-wrap{height:160px;background:var(--bg0);border-top:1px solid var(--border);border-bottom:1px solid var(--border);flex-shrink:0}
+
+/* ── Correlation heatmap ────────────────────────────────────────────────────── */
+.heatmap-panel{margin-top:0}
+.heatmap-grid{display:grid;grid-template-columns:28px repeat(5,1fr);grid-template-rows:20px repeat(5,1fr);gap:2px;margin-bottom:8px}
+.hm-corner{}
+.hm-label{font-size:10px;font-weight:700;color:var(--txt3);display:flex;align-items:center;justify-content:center;overflow:hidden}
+.hm-col-label{align-items:flex-end;padding-bottom:2px}
+.hm-row-label{align-items:center;justify-content:flex-end;padding-right:4px;font-size:10px}
+.hm-cell{border-radius:3px;display:flex;align-items:center;justify-content:center;height:36px;transition:filter .2s;cursor:default}
+.hm-cell:hover{filter:brightness(1.4)}
+.hm-val{font-size:9px;color:rgba(255,255,255,.85);font-family:"Courier New",monospace;font-weight:700}
+.hm-diag{font-size:9px;color:rgba(255,255,255,.4)}
+.hm-legend{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:10px;color:var(--txt3)}
+.hm-grad{flex:1;height:6px;border-radius:3px;background:linear-gradient(to right,rgba(220,80,60,.8),#162035,rgba(70,130,200,.8))}
+.hm-neg{color:#e05050}
+.hm-pos{color:#4682c8}
+
+/* ── Milestones row ─────────────────────────────────────────────────────────── */
+.milestones-row{display:flex;gap:20px;padding:8px 20px;background:rgba(0,0,0,.3);border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap}
+.milestone-item{display:flex;align-items:center;gap:6px;font-size:11px}
+.ms-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.ms-label{color:var(--txt3)}
+.ms-cycle{font-family:"Courier New",monospace;font-weight:600}
+
+/* ── Confidence bar ─────────────────────────────────────────────────────────── */
+.conf-bar-wrap{display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:6px}
+.conf-bar-track{flex:1;height:6px;background:rgba(255,255,255,.07);border-radius:3px;overflow:hidden}
+.conf-bar-fill{height:100%;border-radius:3px;transition:width .4s ease}
+.conf-bar-label{font-size:12px;font-weight:700;font-family:"Courier New",monospace;min-width:36px;text-align:right}
+
+/* ── Alert pulse animation ──────────────────────────────────────────────────── */
+@keyframes alertPulse {
+  0%,100%{box-shadow:0 0 0 0 rgba(240,68,68,0)}
+  50%{box-shadow:0 0 0 6px rgba(240,68,68,.25)}
+}
+.state-alert-active .badge-alert,
+.state-alert-active .badge-alert_held{animation:alertPulse 2s ease-in-out infinite}
+.state-alert-active .detail-header{border-bottom-color:rgba(240,68,68,.35)}
+
+/* ── Header right cluster ───────────────────────────────────────────────────── */
+.dh-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+.time-in-state{font-size:11px;padding:3px 8px;border:1px solid var(--border);border-radius:3px}
+.demo-phase{font-size:11px;padding:3px 10px;border:1px solid rgba(70,130,200,.3);border-radius:3px;color:var(--blue2);background:rgba(70,130,200,.06)}
+
 /* ── Scrollbar ──────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar{width:6px;height:6px}
 ::-webkit-scrollbar-track{background:transparent}
