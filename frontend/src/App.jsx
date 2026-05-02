@@ -1,6 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+// ── Constants ──────────────────────────────────────────────────────────────────
 
 const API_BASE = import.meta.env.VITE_NERAIUM_API_BASE || "/api";
+
 const SIGNAL_NAMES = [
   "spindle_vibration",
   "spindle_motor_current",
@@ -8,20 +11,44 @@ const SIGNAL_NAMES = [
   "axis_servo_load",
   "cutting_zone_temperature",
 ];
-const SIGNAL_LABELS = {
-  sensor_0: "Spindle Vibration",
-  sensor_1: "Spindle Motor Current",
-  sensor_2: "Coolant Flow Rate",
-  sensor_3: "Axis Servo Load",
-  sensor_4: "Cutting Zone Temperature",
+
+const SIGNAL_DISPLAY = {
+  spindle_vibration: "Spindle Vibration",
+  spindle_motor_current: "Spindle Motor Current",
+  coolant_flow_rate: "Coolant Flow Rate",
+  axis_servo_load: "Axis Servo Load",
+  cutting_zone_temperature: "Cutting Zone Temp",
 };
-const GRAPH_NODES = [
-  { id: "sensor_0", x: 50, y: 40 },
-  { id: "sensor_1", x: 250, y: 40 },
-  { id: "sensor_2", x: 50, y: 170 },
-  { id: "sensor_3", x: 250, y: 170 },
-  { id: "sensor_4", x: 150, y: 105 },
+
+const DEMO_INTERVALS = { slow: 1000, normal: 450, fast: 150 };
+
+const EVIDENCE_FAMILIES = [
+  { key: "sensor_deviation", label: "Sensor deviation" },
+  { key: "relationship_shift", label: "Relationship shift" },
+  { key: "relational_stability_change", label: "Relational stability change" },
+  { key: "trajectory_pressure", label: "Trajectory pressure" },
 ];
+
+// ── Data ───────────────────────────────────────────────────────────────────────
+
+function emptyMachineRecord() {
+  return {
+    systemOutput: {
+      operator: { status: "INITIALIZING" },
+      engineer: { status: "INITIALIZING" },
+    },
+    cycle: 0,
+    history: [],
+    signalHistory: Object.fromEntries(SIGNAL_NAMES.map((n) => [n, []])),
+    lastSignals: null,
+    lastUpdate: null,
+    milestones: { baselineFormed: null, firstWatch: null, firstAlert: null },
+    stateHistory: [],
+    lastStatus: "INITIALIZING",
+  };
+}
+
+// ── RNG + demo data ────────────────────────────────────────────────────────────
 
 function createRng(seed = 42) {
   let state = seed >>> 0;
@@ -34,881 +61,790 @@ function createRng(seed = 42) {
 function normal(rng, mean = 0, std = 1) {
   const u1 = Math.max(rng(), Number.EPSILON);
   const u2 = rng();
-  const z0 = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-  return mean + std * z0;
+  return mean + std * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
 }
 
-function demoPacket(cycle, rng) {
-  const signals = {
+function demoPacketCNC01(cycle, rng) {
+  const s = {
     spindle_vibration: normal(rng, 0, 1),
     spindle_motor_current: normal(rng, 0, 1),
     coolant_flow_rate: normal(rng, 0, 1),
     axis_servo_load: normal(rng, 0, 1),
     cutting_zone_temperature: normal(rng, 0, 1),
   };
-
   if (cycle >= 70) {
     const progress = (cycle - 70) / 120;
     const shared = normal(rng, 0, 1);
     const coupling = 0.35 + 1.25 * progress;
     const drift = 0.02 * (cycle - 70);
-
-    signals.spindle_vibration = coupling * shared + drift;
-    signals.spindle_motor_current = coupling * shared + normal(rng, 0, 0.04) + drift;
-    signals.coolant_flow_rate = normal(rng, 0, 1);
-    signals.axis_servo_load = normal(rng, 0, 1);
-    signals.cutting_zone_temperature = normal(rng, 0, 1);
+    s.spindle_vibration = coupling * shared + drift;
+    s.spindle_motor_current = coupling * shared + normal(rng, 0, 0.04) + drift;
   }
-
-  return SIGNAL_NAMES.reduce((ordered, name) => {
-    ordered[name] = signals[name];
-    return ordered;
-  }, {});
+  return SIGNAL_NAMES.reduce((o, n) => { o[n] = s[n]; return o; }, {});
 }
 
-async function postJson(path, payload, apiBase) {
-  const response = await fetch(`${apiBase}${path}`, {
+function demoPacketStable(rng) {
+  return SIGNAL_NAMES.reduce((o, n) => { o[n] = normal(rng, 0, 1); return o; }, {});
+}
+
+// ── HTTP ───────────────────────────────────────────────────────────────────────
+
+async function postJson(path, payload, base) {
+  const r = await fetch(`${base}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-
-  if (!response.ok) {
-    throw new Error(`${path} failed with ${response.status}`);
-  }
-
-  return response.json();
+  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  return r.json();
 }
 
-async function getJson(path, apiBase) {
-  const response = await fetch(`${apiBase}${path}`);
-
-  if (!response.ok) {
-    throw new Error(`${path} failed with ${response.status}`);
-  }
-
-  return response.json();
+async function getJson(path, base) {
+  const r = await fetch(`${base}${path}`);
+  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  return r.json();
 }
 
-function App() {
-  const [systemOutput, setSystemOutput] = useState({
-    operator: { status: "INITIALIZING" },
-    engineer: { status: "INITIALIZING" },
-  });
-  const [cycle, setCycle] = useState(0);
-  const [isRunning, setIsRunning] = useState(false);
-  const [error, setError] = useState("");
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [history, setHistory] = useState([]);
-  const [activeTab, setActiveTab] = useState("operator");
-  const [apiBase, setApiBase] = useState(API_BASE);
-  const [sourceMode, setSourceMode] = useState("demo");
-  const [csvRows, setCsvRows] = useState([]);
-  const [csvName, setCsvName] = useState("");
-  const [csvError, setCsvError] = useState("");
-  const [backendConnected, setBackendConnected] = useState(false);
-  const [lastUpdateAt, setLastUpdateAt] = useState(null);
-  const [demoSpeedMs, setDemoSpeedMs] = useState(450);
-  const timerRef = useRef(null);
-  const rngRef = useRef(createRng(42));
-  const cycleRef = useRef(0);
+async function doReset(base, machineId = null) {
+  const url = machineId
+    ? `${base}/reset?asset_id=${encodeURIComponent(machineId)}`
+    : `${base}/reset`;
+  const r = await fetch(url, { method: "POST" });
+  if (!r.ok) throw new Error(`reset → ${r.status}`);
+  return r.json();
+}
 
-  const operator = systemOutput.operator || { status: "INITIALIZING" };
-  const engineer = systemOutput.engineer || { status: "INITIALIZING" };
-  const urgency = operator.trajectory?.urgency || "low";
-  const direction = operator.trajectory?.direction || "not established";
-  const status = operator.status || "INITIALIZING";
-  const metrics = engineer.structural_metrics || {};
-  const evidence = engineer.evidence || {};
-  const relationships = engineer.contributors?.top_relationships || [];
+// ── Helpers ────────────────────────────────────────────────────────────────────
 
-  const statusTone = useMemo(() => {
-    if (status === "CONFIRMED_CHANGE" || status === "CONFIRMED_CHANGE_HELD") {
-      return urgency === "high" ? "critical" : "active";
-    }
-    if (status === "TRANSIENT") return "quiet";
-    return "initializing";
-  }, [status, urgency]);
+function fmt(v, dec = 3) {
+  if (typeof v !== "number" || Number.isNaN(v)) return "—";
+  return v.toFixed(dec);
+}
 
-  async function resetDemo() {
-    stopDemo();
-    setError("");
-    cycleRef.current = 0;
-    rngRef.current = createRng(42);
-    setCycle(0);
-    setHistory([]);
-    const output = await postJson("/reset", {}, apiBase);
-    setBackendConnected(true);
-    setLastUpdateAt(null);
-    setSystemOutput({
-      operator: { status: output.status === "reset" ? "INITIALIZING" : output.status },
-      engineer: { status: output.status === "reset" ? "INITIALIZING" : output.status },
-    });
+function getActionWindow(trajectory, evidence) {
+  // Only show action window if diverging
+  if (!trajectory || trajectory.direction !== "diverging") {
+    return null;
   }
 
-  async function sendCycle() {
-    const currentCycle = cycleRef.current;
-    const signals =
-      sourceMode === "csv" && csvRows.length > 0
-        ? csvRows[currentCycle]
-        : demoPacket(currentCycle, rngRef.current);
+  const velocity = trajectory.drift_velocity || 0;
+  const acceleration = trajectory.drift_acceleration || 0;
+  const persistenceSatisfied = evidence?.persistence_satisfied ?? false;
 
-    if (!signals) {
-      stopDemo();
-      return;
-    }
-
-    const payload = {
-      asset_id: "CNC-01",
-      signals,
-    };
-
-    const output = await postJson("/update", payload, apiBase);
-    setBackendConnected(true);
-    setLastUpdateAt(new Date().toLocaleTimeString());
-    setSystemOutput(output);
-    setHistory((items) => [...items, { cycle: currentCycle, output }].slice(-50));
-    setCycle(currentCycle);
-    cycleRef.current = currentCycle + 1;
+  // Categorize based on velocity and acceleration
+  let window, confidence;
+  if (velocity > 0.1 && acceleration > 0.01) {
+    window = "0–30 cycles";
+    confidence = "high";
+  } else if (velocity > 0.05) {
+    window = "30–80 cycles";
+    confidence = "moderate";
+  } else {
+    window = "80–150 cycles";
+    confidence = "low";
   }
 
-  function startTimer(intervalMs) {
-    if (timerRef.current) {
-      window.clearInterval(timerRef.current);
-    }
+  const basis = `${
+    trajectory.direction === "diverging"
+      ? "Sustained divergence"
+      : "System changing"
+  }${persistenceSatisfied ? " with sustained evidence" : ""}`;
 
-    timerRef.current = window.setInterval(() => {
-      sendCycle().catch((err) => {
-        setError(err.message);
-        setBackendConnected(false);
-        stopDemo();
-      });
-    }, intervalMs);
-  }
+  return { window, confidence, basis };
+}
 
-  function startDemo() {
-    if (timerRef.current) return;
-    setError("");
-    setIsRunning(true);
-    startTimer(demoSpeedMs);
-  }
+// ── Components ──────────────────────────────────────────────────────────────────
 
-  function stopDemo() {
-    if (timerRef.current) {
-      window.clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-    setIsRunning(false);
-  }
-
-  function updateDemoSpeed(event) {
-    const nextSpeed = Number(event.target.value);
-    setDemoSpeedMs(nextSpeed);
-
-    if (timerRef.current) {
-      startTimer(nextSpeed);
-    }
-  }
+function CovarianceChart({ engineer }) {
+  const canvasRef = useRef(null);
 
   useEffect(() => {
-    return () => stopDemo();
-  }, []);
+    if (!canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    canvas.width = canvas.offsetWidth * window.devicePixelRatio;
+    canvas.height = canvas.offsetHeight * window.devicePixelRatio;
+    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+    const rect = canvas.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height;
+
+    // Clear
+    ctx.fillStyle = "#0a0e27";
+    ctx.fillRect(0, 0, w, h);
+
+    // Title
+    ctx.fillStyle = "#a3e0e0";
+    ctx.font = "14px -apple-system, BlinkMacSystemFont, sans-serif";
+    ctx.fillText("Cross-signal covariance shift detected", 20, 25);
+
+    // Axes
+    const margin = 50;
+    const plotW = w - margin * 2;
+    const plotH = h - margin * 2;
+
+    ctx.strokeStyle = "#444";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(margin, h - margin);
+    ctx.lineTo(w - margin, h - margin);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(margin, margin);
+    ctx.lineTo(margin, h - margin);
+    ctx.stroke();
+
+    // Axis labels
+    ctx.fillStyle = "#888";
+    ctx.font = "12px -apple-system, BlinkMacSystemFont, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Spindle Vibration", margin + plotW / 2, h - 10);
+    ctx.save();
+    ctx.translate(15, margin + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("Spindle Motor Current", 0, 0);
+    ctx.restore();
+
+    // Sample points (mock data: baseline vs current)
+    const scale = 0.3;
+    const samples = 20;
+
+    // Baseline points (blue)
+    ctx.fillStyle = "rgba(70, 130, 200, 0.5)";
+    for (let i = 0; i < samples; i++) {
+      const x = Math.random() - 0.5;
+      const y = Math.random() - 0.5;
+      const px = margin + (x + 0.5) * scale * plotW;
+      const py = h - margin - (y + 0.5) * scale * plotH;
+      ctx.beginPath();
+      ctx.arc(px, py, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Current points (orange)
+    ctx.fillStyle = "rgba(255, 140, 0, 0.7)";
+    for (let i = 0; i < samples; i++) {
+      const x = Math.random() - 0.4;
+      const y = Math.random() + 0.1;
+      const px = margin + (x + 0.5) * scale * plotW;
+      const py = h - margin - (y + 0.5) * scale * plotH;
+      ctx.beginPath();
+      ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Legend
+    ctx.font = "12px -apple-system, BlinkMacSystemFont, sans-serif";
+    ctx.fillStyle = "#888";
+    ctx.textAlign = "left";
+
+    ctx.fillStyle = "rgba(70, 130, 200, 0.8)";
+    ctx.fillRect(w - 160, 30, 12, 12);
+    ctx.fillStyle = "#888";
+    ctx.fillText("Baseline", w - 140, 39);
+
+    ctx.fillStyle = "rgba(255, 140, 0, 0.8)";
+    ctx.fillRect(w - 160, 50, 12, 12);
+    ctx.fillStyle = "#888";
+    ctx.fillText("Current", w - 140, 59);
+  }, [engineer]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{ width: "100%", height: "100%", display: "block" }}
+    />
+  );
+}
+
+function StructuralMetrics({ engineer }) {
+  const rel = engineer?.contributors?.top_relationships?.[0] || {};
+  const metrics = engineer?.structural_metrics || {};
+
+  return (
+    <div className="metrics-panel">
+      <h3>Structural Metrics</h3>
+      <div className="metric-row">
+        <span className="label">Baseline correlation:</span>
+        <span className="value">{fmt(rel.baseline_correlation, 3)}</span>
+      </div>
+      <div className="metric-row">
+        <span className="label">Current correlation:</span>
+        <span className="value">{fmt(rel.current_correlation, 3)}</span>
+      </div>
+      <div className="metric-row">
+        <span className="label">Correlation shift:</span>
+        <span className="value">{fmt(rel.correlation_shift, 3)}</span>
+      </div>
+      <div className="metric-row">
+        <span className="label">Cov baseline:</span>
+        <span className="value">{fmt(rel.covariance_shift_abs, 4)}</span>
+      </div>
+      <div className="metric-row">
+        <span className="label">Cov current:</span>
+        <span className="value">{fmt(rel.covariance_shift_norm, 4)}</span>
+      </div>
+      <div className="metric-row">
+        <span className="label">Persistence satisfied:</span>
+        <span className="value evidence-indicator">
+          {engineer?.evidence?.persistence_satisfied ? "✓ Yes" : "— No"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function EvidenceFamilies({ engineer }) {
+  const families = engineer?.evidence?.families || {};
+
+  return (
+    <div className="evidence-panel">
+      <h3>Active Evidence Families</h3>
+      <div className="family-list">
+        {EVIDENCE_FAMILIES.map((f) => (
+          <div key={f.key} className="family-item">
+            <input
+              type="checkbox"
+              checked={families[f.key] === true}
+              readOnly
+            />
+            <label>{f.label}</label>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function OperatorView({ operator, engineer }) {
+  const actionWindow = getActionWindow(operator?.trajectory, engineer?.evidence);
+
+  return (
+    <div className="operator-panel">
+      <div className="op-section">
+        <h4>What is happening</h4>
+        <p className="op-text">
+          {operator?.what_is_happening?.summary ||
+            "Waiting for structural change detection"}
+        </p>
+      </div>
+
+      <div className="op-section">
+        <h4>Where to look</h4>
+        <p className="op-text">
+          {operator?.where_to_look?.where_to_start ||
+            "Start inspection around the top reported signals"}
+        </p>
+      </div>
+
+      <div className="op-section">
+        <h4>Direction</h4>
+        <p className="op-text">
+          {operator?.trajectory?.direction === "diverging"
+            ? "System behavior moving away from baseline"
+            : operator?.trajectory?.direction === "stabilizing"
+            ? "System behavior moving back toward baseline"
+            : operator?.trajectory?.direction === "flat"
+            ? "System state remaining similar"
+            : "Trajectory unclear; additional observation required"}
+        </p>
+      </div>
+
+      <div className="op-section">
+        <h4>Urgency</h4>
+        <p className={`op-text urgency-${operator?.trajectory?.urgency || "low"}`}>
+          {operator?.trajectory?.urgency || "low"}
+        </p>
+      </div>
+
+      <div className="op-section">
+        <h4>Recommended next step</h4>
+        <p className="op-text">
+          {operator?.recommended_next_step === "INSPECT_TOP_SIGNALS_AND_RELATIONSHIPS"
+            ? "Inspect the top identified signals and their relationships"
+            : "Continue monitoring for structural changes"}
+        </p>
+      </div>
+
+      {actionWindow && (
+        <div className="action-window">
+          <h4>Action Window</h4>
+          <div className="aw-content">
+            <div className="aw-row">
+              <span className="aw-label">Cycles:</span>
+              <span className="aw-value">{actionWindow.window}</span>
+            </div>
+            <div className="aw-row">
+              <span className="aw-label">Confidence:</span>
+              <span className={`aw-value conf-${actionWindow.confidence}`}>
+                {actionWindow.confidence}
+              </span>
+            </div>
+            <div className="aw-basis">{actionWindow.basis}</div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TelemetryStrip({ signals }) {
+  return (
+    <div className="telemetry-strip">
+      {SIGNAL_NAMES.map((name) => {
+        const val = signals?.[name] ?? 0;
+        return (
+          <div key={name} className="signal-item">
+            <div className="signal-name">{SIGNAL_DISPLAY[name]}</div>
+            <div className="signal-value">{fmt(val, 2)}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function StateTimeline({ history }) {
+  const recentStates = history.slice(-50);
+
+  return (
+    <div className="timeline-container">
+      <h4>State History (last 50)</h4>
+      <div className="timeline-bar">
+        {recentStates.map((entry, idx) => {
+          const status = entry?.output?.operator?.status || "INITIALIZING";
+          let className = "state-dot";
+          if (
+            status === "ALERT" ||
+            status === "ALERT_HELD"
+          ) {
+            className += " state-alert";
+          } else if (status === "WATCH") {
+            className += " state-watch";
+          } else if (status === "STABLE") {
+            className += " state-stable";
+          } else {
+            className += " state-init";
+          }
+          return (
+            <div
+              key={idx}
+              className={className}
+              title={`${entry.cycle || idx}: ${status}`}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function EngineerDrawer({ engineer, isOpen, onToggle }) {
+  const rel = engineer?.contributors?.top_relationships?.[0] || {};
+
+  return (
+    <div className={`engineer-drawer ${isOpen ? "open" : ""}`}>
+      <button className="drawer-toggle" onClick={onToggle}>
+        {isOpen ? "Hide" : "Show"} Engineer Metrics
+      </button>
+      {isOpen && (
+        <div className="drawer-content">
+          <div className="drawer-section">
+            <h4>Structural Metrics</h4>
+            <table className="metrics-table">
+              <tbody>
+                <tr>
+                  <td>Drift score:</td>
+                  <td>{fmt(engineer?.structural_drift_score, 3)}</td>
+                </tr>
+                <tr>
+                  <td>Relational stability:</td>
+                  <td>{fmt(engineer?.relational_stability_score, 3)}</td>
+                </tr>
+                <tr>
+                  <td>Watch threshold:</td>
+                  <td>{fmt(engineer?.watch_threshold, 3)}</td>
+                </tr>
+                <tr>
+                  <td>Alert threshold:</td>
+                  <td>{fmt(engineer?.alert_threshold, 3)}</td>
+                </tr>
+                <tr>
+                  <td>Confidence:</td>
+                  <td>{fmt(engineer?.confidence_score, 3)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div className="drawer-section">
+            <h4>Trajectory Metrics</h4>
+            <table className="metrics-table">
+              <tbody>
+                <tr>
+                  <td>Drift velocity:</td>
+                  <td>{fmt(engineer?.trajectory?.drift_velocity, 4)}</td>
+                </tr>
+                <tr>
+                  <td>Drift acceleration:</td>
+                  <td>{fmt(engineer?.trajectory?.drift_acceleration, 4)}</td>
+                </tr>
+                <tr>
+                  <td>Direction:</td>
+                  <td>{engineer?.trajectory?.direction || "—"}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div className="drawer-section">
+            <h4>Evidence</h4>
+            <table className="metrics-table">
+              <tbody>
+                <tr>
+                  <td>Evidence count:</td>
+                  <td>{engineer?.evidence?.evidence_count || 0}</td>
+                </tr>
+                <tr>
+                  <td>Active families:</td>
+                  <td>
+                    {engineer?.evidence?.active_families?.length || 0} of{" "}
+                    {EVIDENCE_FAMILIES.length}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          {rel.pair && (
+            <div className="drawer-section">
+              <h4>Top Relationship</h4>
+              <p>{rel.pair.join(" ↔ ")}</p>
+              <table className="metrics-table">
+                <tbody>
+                  <tr>
+                    <td>Baseline corr:</td>
+                    <td>{fmt(rel.baseline_correlation, 3)}</td>
+                  </tr>
+                  <tr>
+                    <td>Current corr:</td>
+                    <td>{fmt(rel.current_correlation, 3)}</td>
+                  </tr>
+                  <tr>
+                    <td>Correlation shift:</td>
+                    <td>{fmt(rel.correlation_shift, 3)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DetailView({ machineData, machineId, onBack }) {
+  const [engineDrawerOpen, setEngineDrawerOpen] = useState(false);
+
+  const data = machineData;
+  const operator = data?.systemOutput?.operator || {};
+  const engineer = data?.systemOutput?.engineer || {};
+  const status = operator.status || "INITIALIZING";
+
+  return (
+    <div className="detail-view">
+      <div className="detail-header">
+        <button className="back-btn" onClick={onBack}>
+          ← Back
+        </button>
+        <div className="header-content">
+          <h1>Neraium</h1>
+          <h2>CNC Manufacturing Cell</h2>
+          <h3>Live Structural Intelligence</h3>
+        </div>
+        <div className="status-badge" data-status={status}>
+          {status}
+        </div>
+      </div>
+
+      <div className="main-grid">
+        <div className="left-panel">
+          <div className="chart-section">
+            <CovarianceChart engineer={engineer} />
+          </div>
+          <div className="metrics-section">
+            <StructuralMetrics engineer={engineer} />
+            <EvidenceFamilies engineer={engineer} />
+          </div>
+          <div className="note-section">
+            <p className="note-text">
+              No individual signal threshold is required. Neraium detects
+              structural relationship change.
+            </p>
+          </div>
+        </div>
+
+        <div className="right-panel">
+          <OperatorView operator={operator} engineer={engineer} />
+        </div>
+      </div>
+
+      <div className="telemetry-section">
+        <TelemetryStrip signals={data?.lastSignals} />
+      </div>
+
+      <div className="timeline-section">
+        <StateTimeline history={data?.history || []} />
+      </div>
+
+      <div className="engineer-section">
+        <EngineerDrawer
+          engineer={engineer}
+          isOpen={engineDrawerOpen}
+          onToggle={() => setEngineDrawerOpen(!engineDrawerOpen)}
+        />
+      </div>
+    </div>
+  );
+}
+
+function FloorView({ machines, onSelectMachine }) {
+  return (
+    <div className="floor-view">
+      <div className="floor-header">
+        <h1>Neraium</h1>
+        <h2>Manufacturing Floor</h2>
+      </div>
+      <div className="machines-grid">
+        {machines.map((m) => (
+          <button
+            key={m.id}
+            className="machine-btn"
+            onClick={() => onSelectMachine(m.id)}
+          >
+            <div className="machine-id">{m.id}</div>
+            <div className="machine-type">{m.type}</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ───────────────────────────────────────────────────────────────────
+
+const MACHINES = [
+  { id: "CNC-01", type: "5-axis mill" },
+  { id: "CNC-02", type: "horizontal mill" },
+  { id: "CNC-03", type: "lathe cell" },
+  { id: "CNC-04", type: "grinding cell" },
+];
+
+function App() {
+  const [selectedMachineId, setSelectedMachineId] = useState(null);
+  const [machineData, setMachineData] = useState(
+    Object.fromEntries(MACHINES.map((m) => [m.id, emptyMachineRecord()]))
+  );
+  const [isRunning, setIsRunning] = useState(false);
+  const [demoSpeed, setDemoSpeed] = useState("normal");
+  const [error, setError] = useState("");
+  const [backendConnected, setBackendConnected] = useState(false);
+  const [apiBase, setApiBase] = useState(API_BASE);
+
+  const timerRef = useRef(null);
+  const machineRngs = useRef(
+    Object.fromEntries(MACHINES.map((m, i) => [m.id, createRng(42 + i)]))
+  );
+  const machineCycles = useRef(Object.fromEntries(MACHINES.map((m) => [m.id, 0])));
+  const apiBaseRef = useRef(apiBase);
+
+  useEffect(() => {
+    apiBaseRef.current = apiBase;
+  }, [apiBase]);
 
   useEffect(() => {
     let active = true;
     getJson("/health", apiBase)
       .then(() => {
-        if (active) {
-          setBackendConnected(true);
-        }
+        if (active) setBackendConnected(true);
       })
       .catch(() => {
-        if (active) {
-          setBackendConnected(false);
-        }
+        if (active) setBackendConnected(false);
       });
-
     return () => {
       active = false;
     };
   }, [apiBase]);
 
-  return (
-    <main className="console-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Live structural visibility for industrial systems</p>
-          <h1>Neraium Operator Console</h1>
-        </div>
-        <div className="cycle-readout">
-          <span>Cycle</span>
-          <strong>{cycle}</strong>
-        </div>
-      </header>
+  useEffect(() => {
+    return () => stopDemo();
+  }, []);
 
-      <nav className="tabbar" aria-label="Console sections">
-        <button
-          type="button"
-          className={activeTab === "operator" ? "active" : ""}
-          onClick={() => setActiveTab("operator")}
-        >
-          Operator
-        </button>
-        <button
-          type="button"
-          className={activeTab === "relationships" ? "active" : ""}
-          onClick={() => setActiveTab("relationships")}
-        >
-          Relationships
-        </button>
-        <button
-          type="button"
-          className={activeTab === "evidence" ? "active" : ""}
-          onClick={() => setActiveTab("evidence")}
-        >
-          Evidence
-        </button>
-        <button
-          type="button"
-          className={activeTab === "controls" ? "active" : ""}
-          onClick={() => setActiveTab("controls")}
-        >
-          Demo
-        </button>
-        <button
-          type="button"
-          className={activeTab === "settings" ? "active" : ""}
-          onClick={() => setActiveTab("settings")}
-        >
-          Settings
-        </button>
-      </nav>
+  async function sendAllCycles() {
+    const base = apiBaseRef.current;
 
-      {activeTab === "operator" && (
-        <>
-      <section className={`asset-panel ${statusTone}`}>
-        <div className="asset-heading">
-          <div>
-            <p className="label">Asset</p>
-            <h2>CNC-01</h2>
-          </div>
-          <StatusBadge status={status} urgency={urgency} />
-        </div>
+    const results = await Promise.all(
+      MACHINES.map(async (machine) => {
+        const cycle = machineCycles.current[machine.id];
+        const rng = machineRngs.current[machine.id];
+        let signals;
+        if (machine.id === "CNC-01") {
+          signals = demoPacketCNC01(cycle, rng);
+        } else {
+          signals = demoPacketStable(rng);
+        }
+        const ts = new Date().toISOString();
+        const packet = { asset_id: machine.id, signals, cycle, timestamp: ts };
+        const output = await postJson("/update", packet, base);
+        machineCycles.current[machine.id] = cycle + 1;
+        return { machineId: machine.id, cycle, output, signals };
+      })
+    );
 
-        <OperatorAlert operator={operator} status={status} direction={direction} urgency={urgency} />
-      </section>
+    const valid = results.filter(Boolean);
+    if (valid.length === 0) {
+      stopDemo();
+      return;
+    }
 
-      <StructuralStateStrip metrics={metrics} evidence={evidence} />
+    setBackendConnected(true);
+    setMachineData((prev) => {
+      const next = { ...prev };
+      valid.forEach(({ machineId, cycle, output, signals }) => {
+        const p = prev[machineId] || emptyMachineRecord();
+        const newStatus = output.operator?.status || "INITIALIZING";
+        const pm = p.milestones || {
+          baselineFormed: null,
+          firstWatch: null,
+          firstAlert: null,
+        };
+        const milestones = { ...pm };
+        if (milestones.baselineFormed === null && newStatus !== "INITIALIZING")
+          milestones.baselineFormed = cycle;
+        if (milestones.firstWatch === null && newStatus === "WATCH")
+          milestones.firstWatch = cycle;
+        if (
+          milestones.firstAlert === null &&
+          (newStatus === "ALERT" || newStatus === "ALERT_HELD")
+        )
+          milestones.firstAlert = cycle;
 
-      <section className="story-layout operator-only">
-        <article className="operator-story">
-          <p className="label">Operator Story</p>
-          <h3>{operatorSummary(status, operator)}</h3>
-          <p className="story-copy">
-            {operatorMeaning(status, operator)}
-          </p>
-
-          <div className="story-block">
-            <span>Where to look</span>
-            <ul>
-              {(operator.where_to_look?.subsystems || ["Awaiting confirmed evidence"]).map(
-                (item) => (
-                  <li key={item}>{item}</li>
-                ),
-              )}
-            </ul>
-          </div>
-
-          <div className="story-block">
-            <span>Recommended checks</span>
-            <ol>
-              {(operator.recommended_checks || ["Continue monitoring until a confirmed structural change appears."]).map(
-                (item) => (
-                  <li key={item}>{item}</li>
-                ),
-              )}
-            </ol>
-          </div>
-
-          <div className="story-block">
-            <span>Decision basis</span>
-            <ul>
-              {(operator.decision_basis || ["No confirmed structural change."]).map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-          </div>
-
-          <div className="story-block">
-            <span>Watch next</span>
-            <p>{watchNextCopy(operator.watch_next)}</p>
-          </div>
-
-          <div className="story-block">
-            <span>Why it matters</span>
-            <p>{operator.why_it_matters?.meaning || "No structural change is confirmed yet."}</p>
-          </div>
-
-          <div className="story-block muted">
-            <span>If ignored</span>
-            <p>{operator.if_ignored?.expected_behavior || "No confirmed behavior to project."}</p>
-          </div>
-
-          <div className="story-block muted">
-            <span>What this does not claim</span>
-            <p>
-              {operator.plain_english?.what_we_are_not_claiming ||
-                "This view does not claim a failure mode, failure time, or exact physical cause."}
-            </p>
-          </div>
-        </article>
-      </section>
-        </>
-      )}
-
-      {activeTab === "relationships" && (
-        <section className="insight-layout single-tab">
-          <LiveRelationshipGraph
-            operator={operator}
-            relationships={relationships}
-            status={status}
-            metrics={metrics}
-          />
-          <EvidenceTimeline history={history} />
-        </section>
-      )}
-
-      {activeTab === "evidence" && (
-      <section className="engineer-section">
-        <button
-          type="button"
-          className="drawer-toggle"
-          onClick={() => setDrawerOpen((open) => !open)}
-        >
-          Engineer Evidence Drawer
-          <span>{drawerOpen ? "Hide" : "Show"}</span>
-        </button>
-
-        {drawerOpen && <EngineerDrawer engineer={engineer} />}
-      </section>
-      )}
-
-      {activeTab === "controls" && (
-        <section className="control-tab">
-          <aside className="control-panel">
-            <p className="label">Demo Controls</p>
-            <div className="button-row">
-              <button type="button" onClick={resetDemo}>
-                Reset
-              </button>
-              <button type="button" className="primary" onClick={startDemo} disabled={isRunning}>
-                Start CNC Demo
-              </button>
-              <button type="button" onClick={stopDemo} disabled={!isRunning}>
-                Stop
-              </button>
-            </div>
-            <p className="control-note">
-              Stream introduces coupling between spindle vibration and spindle motor current after
-              stable baseline cycles.
-            </p>
-            <div className="speed-control">
-              <label htmlFor="demo-speed">
-                Demo speed
-                <strong>{demoSpeedMs} ms / cycle</strong>
-              </label>
-              <input
-                id="demo-speed"
-                type="range"
-                min="120"
-                max="1200"
-                step="30"
-                value={demoSpeedMs}
-                onChange={updateDemoSpeed}
-              />
-              <div className="speed-scale">
-                <span>Fast</span>
-                <span>Slow</span>
-              </div>
-            </div>
-            <div className="control-readouts">
-              <Metric label="Current cycle" value={cycle} />
-              <Metric label="Backend" value={backendConnected ? "connected" : "not connected"} />
-              <Metric label="Last update" value={lastUpdateAt || "none"} />
-              <Metric
-                label="Input source"
-                value={sourceMode === "csv" ? `CSV (${csvRows.length} rows)` : "Built-in demo"}
-              />
-            </div>
-            {error && <p className="error-text">{error}</p>}
-          </aside>
-          <EvidenceTimeline history={history} />
-        </section>
-      )}
-
-      {activeTab === "settings" && (
-        <SettingsPanel
-          apiBase={apiBase}
-          setApiBase={setApiBase}
-          sourceMode={sourceMode}
-          setSourceMode={setSourceMode}
-          csvRows={csvRows}
-          setCsvRows={setCsvRows}
-          csvName={csvName}
-          setCsvName={setCsvName}
-          csvError={csvError}
-          setCsvError={setCsvError}
-        />
-      )}
-    </main>
-  );
-}
-
-function StatusBadge({ status, urgency }) {
-  return (
-    <div className={`status-badge urgency-${urgency}`}>
-      <span>{urgency}</span>
-      <strong>{status}</strong>
-    </div>
-  );
-}
-
-function OperatorAlert({ operator, status, direction, urgency }) {
-  const topSignals = operator.where?.top_signals || [];
-  const relationship = operator.where?.top_relationship_pair || [];
-  const subsystems = operator.where_to_look?.subsystems || [];
-  const primarySummary =
-    operator.plain_english?.what_this_means || operatorMeaning(status, operator);
-  const relationshipCopy =
-    relationship.length === 2
-      ? `${relationship[0]} and ${relationship[1]} are moving together in a way they normally do not.`
-      : "These signals are moving together in a way they normally do not.";
-  const inspectCopy =
-    subsystems.length > 0
-      ? `Inspect ${subsystems.join(" and ")}.`
-      : "Inspection target will appear after confirmed structural evidence.";
-
-  return (
-    <div className="operator-alert">
-      <div className="alert-main">
-        <div className="alert-kicker">
-          <p className="label">Main Operator Alert</p>
-          <span>Asset CNC-01</span>
-        </div>
-        <h3>{primarySummary}</h3>
-        <p>{relationshipCopy}</p>
-        <p className="claim-boundary">
-          This does not identify an exact failed component or failure time.
-        </p>
-      </div>
-      <div className="alert-grid">
-        <Metric label="Status" value={status} />
-        <Metric label="Direction" value={direction} />
-        <Metric label="Urgency" value={urgency} />
-        <Metric
-          label="Recommended action"
-          value={operator.recommended_next_step || "CONTINUE_MONITORING"}
-        />
-        <div className="metric primary-relationship">
-          <span>Primary relationship</span>
-          <div>
-            {(relationship.length > 0 ? relationship : ["Awaiting relationship evidence"]).map(
-              (signal) => (
-                <strong key={signal}>{signal}</strong>
-              ),
-            )}
-          </div>
-        </div>
-        <div className="metric primary-signals">
-          <span>Primary signals</span>
-          <div>
-            {(topSignals.length > 0 ? topSignals : ["Awaiting signal evidence"]).map((signal) => (
-              <strong key={signal}>{signal}</strong>
-            ))}
-          </div>
-        </div>
-      </div>
-      <div className="inspect-row">
-        <span>Where to inspect</span>
-        <p>{inspectCopy}</p>
-        <div>
-          {(subsystems.length > 0 ? subsystems : ["Awaiting confirmed evidence"]).map((item) => (
-            <strong key={item}>{item}</strong>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function StructuralStateStrip({ metrics, evidence }) {
-  return (
-    <section className="state-strip">
-      <Metric label="Drift Score" value={formatNumber(metrics.drift_score)} />
-      <Metric label="Relational Stability" value={formatNumber(metrics.relational_stability)} />
-      <Metric label="Covariance Shift" value={formatNumber(metrics.covariance_shift)} />
-      <Metric label="Active Evidence Families" value={evidence.active_families ?? "none"} />
-    </section>
-  );
-}
-
-function LiveRelationshipGraph({ operator, relationships, status, metrics }) {
-  const topPairNames = operator.where?.top_relationship_pair || [];
-  const topSignals = operator.where?.top_signals || [];
-  const topRelationship =
-    relationships.find((relationship) => sameNamePair(relationship.pair, topPairNames)) ||
-    relationships[0];
-  const activePair = topRelationship?.pair || [];
-  const shift = Number(metrics?.covariance_shift || 0);
-  const confirmed = status === "CONFIRMED_CHANGE" || status === "CONFIRMED_CHANGE_HELD";
-  const intensity = confirmed ? Math.min(1, Math.max(0.45, shift / 1.6)) : 0.18;
-  const activeEdge = activePair.length === 2 ? getEdge(activePair[0], activePair[1]) : null;
-
-  return (
-    <section className="relationship-graph panel-block">
-      <div className="section-heading">
-        <p className="label">Live Relationship Graph</p>
-        <span>edge intensity {formatNumber(shift)}</span>
-      </div>
-      <svg viewBox="0 0 300 210" role="img" aria-label="CNC signal relationship graph">
-        {activeEdge && (
-          <line
-            x1={activeEdge.x1}
-            y1={activeEdge.y1}
-            x2={activeEdge.x2}
-            y2={activeEdge.y2}
-            stroke={`rgba(216, 184, 106, ${intensity})`}
-            strokeWidth={3 + intensity * 7}
-            strokeLinecap="round"
-          />
-        )}
-        {GRAPH_NODES.map((node) => {
-          const label = SIGNAL_LABELS[node.id];
-          const active = activePair.includes(node.id);
-          const topSignal = topSignals.includes(label);
-          return (
-            <g
-              key={node.id}
-              className={`graph-node ${active ? "active" : ""} ${topSignal ? "top-signal" : ""}`}
-            >
-              <circle cx={node.x} cy={node.y} r={active ? 18 : 14} />
-              <text x={node.x} y={node.y + 32}>
-                {label}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
-    </section>
-  );
-}
-
-function EvidenceTimeline({ history }) {
-  const firstConfirmedIndex = history.findIndex((item) =>
-    ["CONFIRMED_CHANGE", "CONFIRMED_CHANGE_HELD"].includes(item.output.operator?.status),
-  );
-  const driftValues = history
-    .map((item) => item.output.engineer?.structural_metrics?.drift_score)
-    .filter((value) => typeof value === "number" && !Number.isNaN(value));
-  const maxDrift = Math.max(1, ...driftValues);
-  const points = history
-    .map((item, index) => {
-      const value = item.output.engineer?.structural_metrics?.drift_score;
-      if (typeof value !== "number" || Number.isNaN(value)) return null;
-      const x = history.length <= 1 ? 0 : (index / (history.length - 1)) * 100;
-      const y = 42 - (value / maxDrift) * 38;
-      return `${x},${y}`;
-    })
-    .filter(Boolean)
-    .join(" ");
-
-  return (
-    <section className="timeline panel-block">
-      <div className="section-heading">
-        <p className="label">Evidence Timeline</p>
-        <span>last {history.length} cycles</span>
-      </div>
-      <div className="status-bars">
-        {history.length === 0 && <em>Waiting for stream data</em>}
-        {history.map((item, index) => (
-          <span
-            key={item.cycle}
-            className={`timeline-bar ${statusClass(item.output.operator?.status)} ${
-              index === firstConfirmedIndex ? "first-confirmed" : ""
-            }`}
-            title={`cycle ${item.cycle}: ${item.output.operator?.status}`}
-          />
-        ))}
-      </div>
-      <svg className="drift-chart" viewBox="0 0 100 48" preserveAspectRatio="none">
-        <polyline points={points} fill="none" stroke="#d8b86a" strokeWidth="2" />
-      </svg>
-    </section>
-  );
-}
-
-function Metric({ label, value }) {
-  return (
-    <div className="metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function operatorSummary(status, operator) {
-  if (operator.what_is_happening?.summary) {
-    return operator.what_is_happening.summary;
+        next[machineId] = {
+          systemOutput: output,
+          cycle: cycle + 1,
+          history: [...(p.history || []), { cycle, output }].slice(-100),
+          lastSignals: signals,
+          lastUpdate: new Date().toISOString(),
+          milestones,
+          lastStatus: newStatus,
+        };
+      });
+      return next;
+    });
   }
 
-  if (status === "TRANSIENT") {
-    return "Baseline established. No confirmed structural change.";
+  function startDemo() {
+    if (isRunning) return;
+    setIsRunning(true);
+    setError("");
+    const interval = DEMO_INTERVALS[demoSpeed] || DEMO_INTERVALS.normal;
+    timerRef.current = setInterval(() => {
+      sendAllCycles().catch((err) => {
+        setError(err.message);
+        stopDemo();
+      });
+    }, interval);
   }
 
-  if (status === "INITIALIZING") {
-    return "Baseline is being established.";
+  function stopDemo() {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    setIsRunning(false);
   }
 
-  return "Structural evidence is being evaluated.";
-}
-
-function operatorMeaning(status, operator) {
-  if (operator.plain_english?.what_this_means) {
-    return operator.plain_english.what_this_means;
-  }
-
-  if (status === "TRANSIENT") {
-    return "Current behavior remains within transient variation around the learned baseline.";
-  }
-
-  if (status === "INITIALIZING") {
-    return "Neraium is collecting enough cycles to compare current behavior against baseline.";
-  }
-
-  return "Persistent structural evidence is present, but the operator summary is still being formed.";
-}
-
-function watchNextCopy(watchNext) {
-  if (!watchNext) {
-    return "No confirmed watch items yet.";
-  }
-
-  const signals = watchNext.signals || [];
-  const relationship = watchNext.relationship || [];
-  const direction = watchNext.direction || "not established";
-
-  if (relationship.length >= 2) {
-    return `Watch ${relationship[0]} and ${relationship[1]} as trajectory remains ${direction}.`;
-  }
-
-  if (signals.length > 0) {
-    return `Watch ${signals.join(" and ")} as trajectory remains ${direction}.`;
-  }
-
-  return `Watch trajectory direction as it remains ${direction}.`;
-}
-
-function EngineerDrawer({ engineer }) {
-  const metrics = engineer.structural_metrics || {};
-  const evidence = engineer.evidence || {};
-  const relationships = engineer.contributors?.top_relationships || [];
-  const trajectory = engineer.trajectory_metrics || {};
-
-  return (
-    <div className="drawer-body">
-      <div className="evidence-grid">
-        <Metric label="Drift score" value={formatNumber(metrics.drift_score)} />
-        <Metric label="Relational stability" value={formatNumber(metrics.relational_stability)} />
-        <Metric label="Covariance shift" value={formatNumber(metrics.covariance_shift)} />
-        <Metric label="Active families" value={evidence.active_families ?? "none"} />
-      </div>
-
-      <div className="technical-block">
-        <span>Evidence families</span>
-        <pre>{JSON.stringify(evidence.supporting_families || {}, null, 2)}</pre>
-      </div>
-
-      <div className="technical-block">
-        <span>Top relationships</span>
-        <div className="relationship-list">
-          {relationships.length === 0 && <p>No relationship evidence yet.</p>}
-          {relationships.map((relationship) => (
-            <div className="relationship-row" key={relationship.pair.join("-")}>
-              <strong>{relationship.pair.join(" / ")}</strong>
-              <span>cov {formatNumber(relationship.covariance_shift_norm)}</span>
-              <span>corr {formatNumber(relationship.correlation_shift)}</span>
-              <span>current {formatNumber(relationship.current_correlation)}</span>
-              <span>baseline {formatNumber(relationship.baseline_correlation)}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="technical-block drawer-columns">
-        <div>
-          <span>Internal pattern</span>
-          <pre>{engineer.pattern?.type || "none"}</pre>
-        </div>
-        <div>
-          <span>Rule triggered</span>
-          <pre>{engineer.pattern?.rule_triggered || "none"}</pre>
-        </div>
-      </div>
-
-      <div className="technical-block">
-        <span>Trajectory metrics</span>
-        <pre>{JSON.stringify(trajectory, null, 2)}</pre>
-      </div>
-    </div>
-  );
-}
-
-function SettingsPanel({
-  apiBase,
-  setApiBase,
-  sourceMode,
-  setSourceMode,
-  csvRows,
-  setCsvRows,
-  csvName,
-  setCsvName,
-  csvError,
-  setCsvError,
-}) {
-  async function handleCsvUpload(event) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
+  async function handleReset() {
     try {
-      const text = await file.text();
-      const rows = parseCsvSignals(text);
-      setCsvRows(rows);
-      setCsvName(file.name);
-      setCsvError("");
-      setSourceMode("csv");
+      setError("");
+      await doReset(apiBase, selectedMachineId || undefined);
+      setMachineData(
+        Object.fromEntries(MACHINES.map((m) => [m.id, emptyMachineRecord()]))
+      );
+      Object.keys(machineCycles.current).forEach(
+        (k) => (machineCycles.current[k] = 0)
+      );
+      Object.keys(machineRngs.current).forEach((k) => {
+        const idx = MACHINES.findIndex((m) => m.id === k);
+        machineRngs.current[k] = createRng(42 + idx);
+      });
     } catch (err) {
-      setCsvRows([]);
-      setCsvName("");
-      setCsvError(err.message);
+      setError(err.message);
     }
   }
 
   return (
-    <section className="settings-grid">
-      <article className="settings-panel">
-        <p className="label">Backend API</p>
-        <label className="field-label" htmlFor="api-base">
-          API base URL
-        </label>
-        <input
-          id="api-base"
-          value={apiBase}
-          onChange={(event) => setApiBase(event.target.value.trim())}
-          placeholder="http://127.0.0.1:8000"
+    <div className="app">
+      <div className="app-controls">
+        <div className="controls-left">
+          <label>
+            API Base:
+            <input
+              type="text"
+              value={apiBase}
+              onChange={(e) => setApiBase(e.target.value)}
+            />
+          </label>
+          {!backendConnected && (
+            <span className="status-offline">Backend offline</span>
+          )}
+        </div>
+        <div className="controls-center">
+          <button onClick={startDemo} disabled={isRunning}>
+            Start Demo
+          </button>
+          <button onClick={stopDemo} disabled={!isRunning}>
+            Stop Demo
+          </button>
+          <label>
+            Speed:
+            <select
+              value={demoSpeed}
+              onChange={(e) => setDemoSpeed(e.target.value)}
+              disabled={isRunning}
+            >
+              <option value="slow">Slow</option>
+              <option value="normal">Normal</option>
+              <option value="fast">Fast</option>
+            </select>
+          </label>
+        </div>
+        <div className="controls-right">
+          <button onClick={handleReset}>Reset</button>
+        </div>
+      </div>
+
+      {error && <div className="error-banner">{error}</div>}
+
+      {selectedMachineId ? (
+        <DetailView
+          machineData={machineData[selectedMachineId]}
+          machineId={selectedMachineId}
+          onBack={() => setSelectedMachineId(null)}
         />
-        <p className="control-note">
-          Use <strong>/api</strong> when running through the Vite proxy, or a full backend URL
-          when calling FastAPI directly.
-        </p>
-      </article>
-
-      <article className="settings-panel">
-        <p className="label">Input Source</p>
-        <div className="source-toggle">
-          <button
-            type="button"
-            className={sourceMode === "demo" ? "active" : ""}
-            onClick={() => setSourceMode("demo")}
-          >
-            Built-in demo
-          </button>
-          <button
-            type="button"
-            className={sourceMode === "csv" ? "active" : ""}
-            onClick={() => setSourceMode("csv")}
-            disabled={csvRows.length === 0}
-          >
-            Loaded CSV
-          </button>
-        </div>
-
-        <label className="file-drop">
-          <span>Load CNC CSV</span>
-          <input type="file" accept=".csv,text/csv" onChange={handleCsvUpload} />
-        </label>
-
-        <div className="csv-status">
-          <strong>{csvName || "No CSV loaded"}</strong>
-          <span>{csvRows.length > 0 ? `${csvRows.length} usable rows` : "Expected CNC signal columns"}</span>
-        </div>
-        {csvError && <p className="error-text">{csvError}</p>}
-      </article>
-    </section>
+      ) : (
+        <FloorView
+          machines={MACHINES}
+          onSelectMachine={setSelectedMachineId}
+        />
+      )}
+    </div>
   );
-}
-
-function parseCsvSignals(text) {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (lines.length < 2) {
-    throw new Error("CSV must include a header and at least one data row.");
-  }
-
-  const headers = splitCsvLine(lines[0]).map((header) => header.trim());
-  const indexes = SIGNAL_NAMES.map((name) => headers.indexOf(name));
-  const missing = SIGNAL_NAMES.filter((_, index) => indexes[index] === -1);
-
-  if (missing.length > 0) {
-    throw new Error(`CSV missing required columns: ${missing.join(", ")}`);
-  }
-
-  return lines.slice(1).map((line, rowIndex) => {
-    const cells = splitCsvLine(line);
-    const signals = {};
-    SIGNAL_NAMES.forEach((name, index) => {
-      const value = Number(cells[indexes[index]]);
-      if (!Number.isFinite(value)) {
-        throw new Error(`CSV row ${rowIndex + 2} has non-numeric value for ${name}.`);
-      }
-      signals[name] = value;
-    });
-    return signals;
-  });
-}
-
-function splitCsvLine(line) {
-  return line.split(",").map((cell) => cell.trim().replace(/^"|"$/g, ""));
-}
-
-function sameNamePair(rawPair, displayPair) {
-  if (!rawPair || !displayPair || rawPair.length !== 2 || displayPair.length !== 2) {
-    return false;
-  }
-  const names = rawPair.map((id) => SIGNAL_LABELS[id] || id);
-  return names.every((name) => displayPair.includes(name));
-}
-
-function getEdge(sourceId, targetId) {
-  const source = GRAPH_NODES.find((node) => node.id === sourceId);
-  const target = GRAPH_NODES.find((node) => node.id === targetId);
-  if (!source || !target) return null;
-  return { x1: source.x, y1: source.y, x2: target.x, y2: target.y };
-}
-
-function statusClass(status) {
-  if (status === "CONFIRMED_CHANGE" || status === "CONFIRMED_CHANGE_HELD") {
-    return "confirmed";
-  }
-  if (status === "TRANSIENT") return "transient";
-  return "initializing";
-}
-
-function formatNumber(value) {
-  if (typeof value !== "number" || Number.isNaN(value)) return "none";
-  return value.toFixed(2);
 }
 
 export default App;

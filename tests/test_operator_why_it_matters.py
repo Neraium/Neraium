@@ -13,7 +13,7 @@ EXPECTED_MEANINGS = {
 
 def engine_output_with_pattern(pattern):
     return {
-        "status": "CONFIRMED_CHANGE",
+        "status": "ALERT",
         "confidence_score": 0.75,
         "what_is_happening": {
             "pattern": pattern,
@@ -34,7 +34,6 @@ def engine_output_with_pattern(pattern):
 def test_each_pattern_returns_correct_meaning():
     for pattern, expected_meaning in EXPECTED_MEANINGS.items():
         result = build_operator_output(engine_output_with_pattern(pattern))
-
         assert result["why_it_matters"]["meaning"] == expected_meaning
         assert (
             result["why_it_matters"]["implication"]
@@ -46,13 +45,11 @@ def test_each_pattern_returns_correct_meaning():
         )
 
 
-def test_why_it_matters_exists_in_confirmed_output():
+def test_why_it_matters_exists_in_alert_output():
     result = build_operator_output(engine_output_with_pattern("RELATIONSHIP_FORMATION"))
-
     assert "why_it_matters" in result
 
 
-def test_why_it_matters_not_present_for_transient():
-    result = build_operator_output({"status": "TRANSIENT"})
-
+def test_why_it_matters_not_present_for_watch():
+    result = build_operator_output({"status": "WATCH"})
     assert "why_it_matters" not in result
