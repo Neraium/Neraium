@@ -2,6 +2,7 @@ import numpy as np
 
 from neraium.config import NeraiumConfig
 from neraium.engine import NeraiumEngine
+from neraium.system_output import build_system_output
 
 
 def healthy_packet(rng):
@@ -122,3 +123,41 @@ def test_engine_holds_confirmed_state_when_evidence_dips():
     assert held["rule_triggered"] == held["what_is_happening"]["summary"]
     assert "drift_score" in held
     assert "top_signals" in held["where"]
+
+
+def test_relationship_formation_with_increasing_coupling_is_diverging():
+    rng = np.random.default_rng(367)
+    engine = NeraiumEngine(NeraiumConfig())
+    found = None
+
+    for cycle in range(200):
+        packet = healthy_packet(rng)
+        if cycle >= 80:
+            progress = (cycle - 80) / 120.0
+            shared = rng.normal(0.0, 1.0)
+            coupling = 0.3 + 1.2 * progress
+            drift = 0.02 * (cycle - 80)
+
+            packet[0] = coupling * shared + drift
+            packet[1] = coupling * shared + rng.normal(0.0, 0.05) + drift
+            packet[2] = rng.normal(0.0, 1.0)
+            packet[3] = rng.normal(0.0, 1.0)
+            packet[4] = rng.normal(0.0, 1.0)
+
+        output = engine.update(packet)
+        if output.get("status") in ("CONFIRMED_CHANGE", "CONFIRMED_CHANGE_HELD"):
+            system_output = build_system_output(output)
+            operator = system_output["operator"]
+            engineer = system_output["engineer"]
+            relationship_pair = set(operator["where"]["top_relationship_pair"] or [])
+            if (
+                engineer["pattern"]["type"] == "RELATIONSHIP_FORMATION"
+                and output["persistence_satisfied"] is True
+                and relationship_pair
+                == {"Spindle Vibration", "Spindle Motor Current"}
+            ):
+                found = operator
+                break
+
+    assert found is not None
+    assert found["trajectory"]["direction"] == "diverging"

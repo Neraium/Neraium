@@ -82,3 +82,77 @@ def test_not_enough_history_is_ambiguous():
         "relational_recovery": 0.0,
         "cycles_of_evidence": 4,
     }
+
+
+def test_persistent_relationship_formation_with_cov_shift_biases_diverging():
+    history = [
+        {"drift_score": 8.0, "rel_stability": 1.3},
+        {"drift_score": 7.0, "rel_stability": 1.35},
+        {"drift_score": 7.5, "rel_stability": 1.4},
+        {"drift_score": 7.0, "rel_stability": 1.45},
+    ]
+    current = {
+        "drift_score": 7.2,
+        "rel_stability": 1.5,
+        "cov_shift": 0.3,
+    }
+
+    result = compute_trajectory_direction(
+        history,
+        current,
+        pattern="RELATIONSHIP_FORMATION",
+        persistence_satisfied=True,
+        cov_shift_threshold=0.15,
+    )
+
+    assert result["direction"] == "diverging"
+
+
+def test_persistent_relationship_formation_does_not_require_extra_stability_check():
+    history = [
+        {"drift_score": 8.0, "rel_stability": 1.0},
+        {"drift_score": 7.5, "rel_stability": 1.0},
+        {"drift_score": 7.0, "rel_stability": 1.0},
+        {"drift_score": 6.8, "rel_stability": 1.0},
+    ]
+    current = {
+        "drift_score": 6.9,
+        "rel_stability": 1.0,
+        "cov_shift": 0.3,
+    }
+
+    result = compute_trajectory_direction(
+        history,
+        current,
+        pattern="RELATIONSHIP_FORMATION",
+        persistence_satisfied=True,
+        cov_shift_threshold=0.15,
+    )
+
+    assert result["direction"] == "diverging"
+
+
+def test_confirmed_persistent_relationship_shift_with_cov_shift_is_diverging():
+    history = [
+        {"drift_score": 8.0, "rel_stability": 1.0},
+        {"drift_score": 7.8, "rel_stability": 1.0},
+        {"drift_score": 7.5, "rel_stability": 1.0},
+        {"drift_score": 7.3, "rel_stability": 1.0},
+    ]
+    current = {
+        "drift_score": 7.2,
+        "rel_stability": 1.0,
+        "cov_shift": 0.25,
+    }
+
+    result = compute_trajectory_direction(
+        history,
+        current,
+        status="CONFIRMED_CHANGE",
+        pattern="STRUCTURAL_CHANGE_UNCERTAIN",
+        persistence_satisfied=True,
+        relationship_shift=True,
+        cov_shift_threshold=0.15,
+    )
+
+    assert result["direction"] == "diverging"

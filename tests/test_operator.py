@@ -50,6 +50,12 @@ def test_transient_input_returns_minimal_output():
     assert result == {"status": "TRANSIENT"}
 
 
+def test_initializing_input_returns_minimal_output():
+    result = build_operator_output({"status": "INITIALIZING"})
+
+    assert result == {"status": "INITIALIZING"}
+
+
 def test_confirmed_change_returns_full_structured_output_without_raw_math():
     result = build_operator_output(make_confirmed_output())
 
@@ -57,7 +63,6 @@ def test_confirmed_change_returns_full_structured_output_without_raw_math():
         "status": "CONFIRMED_CHANGE",
         "confidence_score": 0.75,
         "what_is_happening": {
-            "pattern": "RELATIONSHIP_FORMATION",
             "summary": "Previously weak signal relationships are strengthening.",
         },
         "where": {
@@ -86,6 +91,23 @@ def test_confirmed_change_returns_full_structured_output_without_raw_math():
             "direction": "diverging",
             "urgency": "high",
         },
+        "confidence_level": "medium",
+        "decision_basis": [
+            "confirmed structural change",
+            "top relationship involves two tracked signals",
+            "inspection area is mapped from contributing signals",
+            "trajectory direction is diverging",
+        ],
+        "recommended_checks": [
+            "Compare live traces for Spindle Vibration and Spindle Motor Current.",
+            "Inspect around Spindle assembly and Spindle drive.",
+            "Check recent operating conditions for a change that matches the signal movement.",
+        ],
+        "watch_next": {
+            "signals": ["Spindle Vibration", "Spindle Motor Current"],
+            "relationship": ["Spindle Vibration", "Spindle Motor Current"],
+            "direction": "diverging",
+        },
         "if_ignored": {
             "expected_behavior": "continued structural divergence",
             "basis": "current trajectory direction and persistence",
@@ -98,13 +120,40 @@ def test_confirmed_change_returns_full_structured_output_without_raw_math():
         "recommended_next_step": "INSPECT_TOP_SIGNALS_AND_RELATIONSHIPS",
     }
     assert "drift_score" not in result
+    assert "pattern" not in result["what_is_happening"]
 
 
-def test_held_state_outputs_held_status_and_continue_monitoring_action():
+def test_held_state_with_diverging_trajectory_recommends_inspection():
     result = build_operator_output(make_confirmed_output("CONFIRMED_CHANGE_HELD"))
 
     assert result["status"] == "CONFIRMED_CHANGE_HELD"
+    assert result["recommended_next_step"] == "INSPECT_TOP_SIGNALS_AND_RELATIONSHIPS"
+
+
+def test_held_state_without_diverging_or_high_urgency_continues_monitoring():
+    engine_output = make_confirmed_output("CONFIRMED_CHANGE_HELD")
+    engine_output["trajectory"]["direction"] = "flat"
+
+    result = build_operator_output(engine_output)
+
     assert result["recommended_next_step"] == "CONTINUE_MONITORING"
+
+
+def test_operator_output_includes_actionable_checks_and_watch_items():
+    result = build_operator_output(make_confirmed_output())
+
+    assert result["decision_basis"][0] == "confirmed structural change"
+    assert result["recommended_checks"] == [
+        "Compare live traces for Spindle Vibration and Spindle Motor Current.",
+        "Inspect around Spindle assembly and Spindle drive.",
+        "Check recent operating conditions for a change that matches the signal movement.",
+    ]
+    assert result["watch_next"] == {
+        "signals": ["Spindle Vibration", "Spindle Motor Current"],
+        "relationship": ["Spindle Vibration", "Spindle Motor Current"],
+        "direction": "diverging",
+    }
+    assert result["confidence_level"] == "medium"
 
 
 def test_raw_sensor_ids_are_mapped_to_cnc_friendly_names():

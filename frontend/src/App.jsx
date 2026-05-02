@@ -108,6 +108,7 @@ function App() {
   const [csvError, setCsvError] = useState("");
   const [backendConnected, setBackendConnected] = useState(false);
   const [lastUpdateAt, setLastUpdateAt] = useState(null);
+  const [demoSpeedMs, setDemoSpeedMs] = useState(450);
   const timerRef = useRef(null);
   const rngRef = useRef(createRng(42));
   const cycleRef = useRef(0);
@@ -171,17 +172,25 @@ function App() {
     cycleRef.current = currentCycle + 1;
   }
 
-  function startDemo() {
-    if (timerRef.current) return;
-    setError("");
-    setIsRunning(true);
+  function startTimer(intervalMs) {
+    if (timerRef.current) {
+      window.clearInterval(timerRef.current);
+    }
+
     timerRef.current = window.setInterval(() => {
       sendCycle().catch((err) => {
         setError(err.message);
         setBackendConnected(false);
         stopDemo();
       });
-    }, 450);
+    }, intervalMs);
+  }
+
+  function startDemo() {
+    if (timerRef.current) return;
+    setError("");
+    setIsRunning(true);
+    startTimer(demoSpeedMs);
   }
 
   function stopDemo() {
@@ -190,6 +199,15 @@ function App() {
       timerRef.current = null;
     }
     setIsRunning(false);
+  }
+
+  function updateDemoSpeed(event) {
+    const nextSpeed = Number(event.target.value);
+    setDemoSpeedMs(nextSpeed);
+
+    if (timerRef.current) {
+      startTimer(nextSpeed);
+    }
   }
 
   useEffect(() => {
@@ -285,10 +303,9 @@ function App() {
       <section className="story-layout operator-only">
         <article className="operator-story">
           <p className="label">Operator Story</p>
-          <h3>{operator.what_is_happening?.summary || "Baseline is being established."}</h3>
+          <h3>{operatorSummary(status, operator)}</h3>
           <p className="story-copy">
-            {operator.plain_english?.what_this_means ||
-              "Neraium is collecting enough cycles to compare current behavior against baseline."}
+            {operatorMeaning(status, operator)}
           </p>
 
           <div className="story-block">
@@ -300,6 +317,31 @@ function App() {
                 ),
               )}
             </ul>
+          </div>
+
+          <div className="story-block">
+            <span>Recommended checks</span>
+            <ol>
+              {(operator.recommended_checks || ["Continue monitoring until a confirmed structural change appears."]).map(
+                (item) => (
+                  <li key={item}>{item}</li>
+                ),
+              )}
+            </ol>
+          </div>
+
+          <div className="story-block">
+            <span>Decision basis</span>
+            <ul>
+              {(operator.decision_basis || ["No confirmed structural change."]).map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="story-block">
+            <span>Watch next</span>
+            <p>{watchNextCopy(operator.watch_next)}</p>
           </div>
 
           <div className="story-block">
@@ -370,6 +412,25 @@ function App() {
               Stream introduces coupling between spindle vibration and spindle motor current after
               stable baseline cycles.
             </p>
+            <div className="speed-control">
+              <label htmlFor="demo-speed">
+                Demo speed
+                <strong>{demoSpeedMs} ms / cycle</strong>
+              </label>
+              <input
+                id="demo-speed"
+                type="range"
+                min="120"
+                max="1200"
+                step="30"
+                value={demoSpeedMs}
+                onChange={updateDemoSpeed}
+              />
+              <div className="speed-scale">
+                <span>Fast</span>
+                <span>Slow</span>
+              </div>
+            </div>
             <div className="control-readouts">
               <Metric label="Current cycle" value={cycle} />
               <Metric label="Backend" value={backendConnected ? "connected" : "not connected"} />
@@ -417,8 +478,7 @@ function OperatorAlert({ operator, status, direction, urgency }) {
   const relationship = operator.where?.top_relationship_pair || [];
   const subsystems = operator.where_to_look?.subsystems || [];
   const primarySummary =
-    operator.plain_english?.what_this_means ||
-    "Neraium is collecting enough cycles to compare current behavior against baseline.";
+    operator.plain_english?.what_this_means || operatorMeaning(status, operator);
   const relationshipCopy =
     relationship.length === 2
       ? `${relationship[0]} and ${relationship[1]} are moving together in a way they normally do not.`
@@ -594,6 +654,58 @@ function Metric({ label, value }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function operatorSummary(status, operator) {
+  if (operator.what_is_happening?.summary) {
+    return operator.what_is_happening.summary;
+  }
+
+  if (status === "TRANSIENT") {
+    return "Baseline established. No confirmed structural change.";
+  }
+
+  if (status === "INITIALIZING") {
+    return "Baseline is being established.";
+  }
+
+  return "Structural evidence is being evaluated.";
+}
+
+function operatorMeaning(status, operator) {
+  if (operator.plain_english?.what_this_means) {
+    return operator.plain_english.what_this_means;
+  }
+
+  if (status === "TRANSIENT") {
+    return "Current behavior remains within transient variation around the learned baseline.";
+  }
+
+  if (status === "INITIALIZING") {
+    return "Neraium is collecting enough cycles to compare current behavior against baseline.";
+  }
+
+  return "Persistent structural evidence is present, but the operator summary is still being formed.";
+}
+
+function watchNextCopy(watchNext) {
+  if (!watchNext) {
+    return "No confirmed watch items yet.";
+  }
+
+  const signals = watchNext.signals || [];
+  const relationship = watchNext.relationship || [];
+  const direction = watchNext.direction || "not established";
+
+  if (relationship.length >= 2) {
+    return `Watch ${relationship[0]} and ${relationship[1]} as trajectory remains ${direction}.`;
+  }
+
+  if (signals.length > 0) {
+    return `Watch ${signals.join(" and ")} as trajectory remains ${direction}.`;
+  }
+
+  return `Watch trajectory direction as it remains ${direction}.`;
 }
 
 function EngineerDrawer({ engineer }) {

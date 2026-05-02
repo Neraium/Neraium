@@ -23,8 +23,8 @@ PATTERN_MEANINGS = {
 def build_operator_output(engine_output: dict, sensor_context=None) -> dict:
     status = engine_output.get("status")
 
-    if status == "TRANSIENT":
-        return {"status": "TRANSIENT"}
+    if status in ("INITIALIZING", "TRANSIENT"):
+        return {"status": status}
 
     context = sensor_context or DEFAULT_SENSOR_CONTEXT
     what_is_happening = engine_output.get("what_is_happening", {})
@@ -45,7 +45,6 @@ def build_operator_output(engine_output: dict, sensor_context=None) -> dict:
         "status": status,
         "confidence_score": engine_output.get("confidence_score"),
         "what_is_happening": {
-            "pattern": pattern,
             "summary": PATTERN_SUMMARIES.get(
                 pattern,
                 PATTERN_SUMMARIES["STRUCTURAL_CHANGE_UNCERTAIN"],
@@ -59,8 +58,17 @@ def build_operator_output(engine_output: dict, sensor_context=None) -> dict:
         "plain_english": _plain_english(relationship_pair, where_to_look),
         "trajectory": {
             "direction": trajectory.get("direction"),
-            "urgency": _trajectory_urgency(trajectory),
+            "urgency": _trajectory_urgency(trajectory, engine_output),
         },
+        "confidence_level": _confidence_level(engine_output.get("confidence_score")),
+        "decision_basis": _decision_basis(
+            status,
+            trajectory.get("direction"),
+            where_to_look,
+            relationship_pair,
+        ),
+        "recommended_checks": _recommended_checks(relationship_pair, where_to_look),
+        "watch_next": _watch_next(top_signals, relationship_pair, trajectory.get("direction")),
         "if_ignored": {
             "expected_behavior": _expected_behavior(trajectory.get("direction")),
             "basis": "current trajectory direction and persistence",
@@ -73,7 +81,11 @@ def build_operator_output(engine_output: dict, sensor_context=None) -> dict:
             "implication": "current behavior may not remain consistent under the same conditions",
             "not_claiming": "does not assert specific failure mode or timing",
         },
-        "recommended_next_step": _recommended_next_step(status),
+        "recommended_next_step": _recommended_next_step(
+            status,
+            trajectory.get("direction"),
+            _trajectory_urgency(trajectory, engine_output),
+        ),
     }
 
 
@@ -152,15 +164,88 @@ def _plain_english(relationship_pair, where_to_look):
     }
 
 
-def _recommended_next_step(status):
+def _recommended_next_step(status, direction=None, urgency=None):
     if status == "CONFIRMED_CHANGE_HELD":
+        if direction == "diverging" or urgency == "high":
+            return "INSPECT_TOP_SIGNALS_AND_RELATIONSHIPS"
         return "CONTINUE_MONITORING"
     if status == "CONFIRMED_CHANGE":
         return "INSPECT_TOP_SIGNALS_AND_RELATIONSHIPS"
     return "CONTINUE_MONITORING"
 
 
-def _trajectory_urgency(trajectory):
+def _confidence_level(confidence_score):
+    if confidence_score is None:
+        return "unknown"
+    score = float(confidence_score)
+    if score >= 0.8:
+        return "high"
+    if score >= 0.6:
+        return "medium"
+    return "low"
+
+
+def _decision_basis(status, direction, where_to_look, relationship_pair):
+    basis = []
+    if status == "CONFIRMED_CHANGE":
+        basis.append("confirmed structural change")
+    elif status == "CONFIRMED_CHANGE_HELD":
+        basis.append("recent confirmed structural change is being held for stability")
+    else:
+        basis.append("no confirmed structural change")
+
+    if relationship_pair and len(relationship_pair) >= 2:
+        basis.append("top relationship involves two tracked signals")
+
+    if where_to_look.get("subsystems"):
+        basis.append("inspection area is mapped from contributing signals")
+
+    if direction:
+        basis.append(f"trajectory direction is {direction}")
+
+    return basis
+
+
+def _recommended_checks(relationship_pair, where_to_look):
+    checks = []
+    if relationship_pair and len(relationship_pair) >= 2:
+        checks.append(f"Compare live traces for {relationship_pair[0]} and {relationship_pair[1]}.")
+    else:
+        checks.append("Review the top reported signals against recent baseline behavior.")
+
+    subsystems = where_to_look.get("subsystems", [])
+    if len(subsystems) >= 2:
+        checks.append(f"Inspect around {subsystems[0]} and {subsystems[1]}.")
+    elif len(subsystems) == 1:
+        checks.append(f"Inspect around {subsystems[0]}.")
+    else:
+        checks.append("Inspect around the reported signal sources.")
+
+    checks.append("Check recent operating conditions for a change that matches the signal movement.")
+    return checks
+
+
+def _watch_next(top_signals, relationship_pair, direction):
+    return {
+        "signals": top_signals,
+        "relationship": relationship_pair,
+        "direction": direction,
+    }
+
+
+def _trajectory_urgency(trajectory, engine_output):
+    direction = trajectory.get("direction")
+    if direction == "diverging":
+        if engine_output.get("persistence_satisfied") is True:
+            drift_score = float(engine_output.get("drift_score") or 0.0)
+            drift_velocity = abs(float(trajectory.get("drift_velocity") or 0.0))
+            if drift_score >= 10.0 or drift_velocity >= 1.0:
+                return "high"
+            return "medium"
+        return "high"
+    if direction in ("stabilizing", "flat", "ambiguous"):
+        return "low"
+
     slopes = trajectory.get("recent_slopes", [])
     if len(slopes) < 2:
         return "low"

@@ -1,8 +1,8 @@
 def build_engineer_output(engine_output: dict) -> dict:
     status = engine_output.get("status")
 
-    if status == "TRANSIENT":
-        return {"status": "TRANSIENT"}
+    if status in ("INITIALIZING", "TRANSIENT"):
+        return {"status": status}
 
     trajectory = engine_output.get("trajectory", {})
     what_is_happening = engine_output.get("what_is_happening", {})

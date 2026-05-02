@@ -12,6 +12,7 @@ class NeraiumEngine:
         self.baseline = None
         self.window = []
         self.history = []
+        self.trajectory_history = []
         self._drift_history = []
         self._max_window = 30
         self._max_history = 100
@@ -39,6 +40,15 @@ class NeraiumEngine:
         self._drift_history.append(evidence["drift_score"])
         self._drift_history = self._drift_history[-self._max_history:]
 
+        scores = {
+            "drift_score": evidence["drift_score"],
+            "rel_stability": evidence["diagnostics"]["rel_stability"],
+            "cov_shift": evidence["diagnostics"]["cov_shift"],
+            "trajectory_pressure": 0.0,
+        }
+        self.trajectory_history.append(scores)
+        self.trajectory_history = self.trajectory_history[-self._max_history:]
+
         if (
             evidence["status"] == "TRANSIENT"
             and self._confirmed_hold_remaining <= 0
@@ -55,12 +65,6 @@ class NeraiumEngine:
             config=self.config,
         )
 
-        scores = {
-            "drift_score": evidence["drift_score"],
-            "rel_stability": evidence["diagnostics"]["rel_stability"],
-            "cov_shift": evidence["diagnostics"]["cov_shift"],
-            "trajectory_pressure": 0.0,
-        }
         previous_scores = (
             {
                 **self.history[-1],
@@ -70,7 +74,18 @@ class NeraiumEngine:
             else None
         )
         pattern = classify_pattern(scores, previous_scores)
-        trajectory = compute_trajectory_direction(self.history, scores)
+        trajectory = compute_trajectory_direction(
+            self.trajectory_history[:-1],
+            scores,
+            status=evidence["status"],
+            pattern=pattern["pattern"],
+            persistence_satisfied=evidence["persistence_satisfied"],
+            relationship_shift=evidence["supporting_families"].get(
+                "relationship_shift",
+                False,
+            ),
+            cov_shift_threshold=getattr(self.config, "cov_shift_threshold", 0.15),
+        )
         self._slope_history.append(trajectory["drift_velocity"])
         self._slope_history = self._slope_history[-50:]
         trajectory = {

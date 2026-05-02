@@ -58,6 +58,16 @@ def test_transient_input_returns_all_views_as_transient():
     assert result["raw_engine"]["status"] == "TRANSIENT"
 
 
+def test_initializing_input_returns_all_views_as_initializing():
+    engine_output = {"status": "INITIALIZING"}
+
+    result = build_system_output(engine_output)
+
+    assert result["operator"] == {"status": "INITIALIZING"}
+    assert result["engineer"] == {"status": "INITIALIZING"}
+    assert result["raw_engine"]["status"] == "INITIALIZING"
+
+
 def test_confirmed_change_returns_all_views_and_raw_engine_identity():
     engine_output = make_engine_output()
 

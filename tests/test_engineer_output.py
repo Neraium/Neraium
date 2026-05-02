@@ -44,6 +44,12 @@ def test_transient_returns_minimal_output():
     assert result == {"status": "TRANSIENT"}
 
 
+def test_initializing_returns_minimal_output():
+    result = build_engineer_output({"status": "INITIALIZING"})
+
+    assert result == {"status": "INITIALIZING"}
+
+
 def test_confirmed_returns_full_output():
     result = build_engineer_output(make_engine_output())
 
