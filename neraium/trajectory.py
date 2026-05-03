@@ -8,7 +8,16 @@ whether the structural state is diverging, stabilizing, or flat.
 import numpy as np
 
 
-def compute_trajectory_direction(history, current):
+def compute_trajectory_direction(
+    history,
+    current,
+    *,
+    pattern: str = None,
+    status: str = None,
+    persistence_satisfied: bool = False,
+    relationship_shift: bool = False,
+    cov_shift_threshold: float = 0.15,
+):
     """
     Compute trajectory direction from a list of score dicts.
 
@@ -58,6 +67,15 @@ def compute_trajectory_direction(history, current):
         direction = "flat"
     else:
         direction = "ambiguous"
+
+    # Structural context override: confirmed structural change with cov shift
+    # forces "diverging" regardless of drift velocity trend.
+    cov_shift = float(current.get("cov_shift", current.get("covariance_shift", 0.0)))
+    if persistence_satisfied and cov_shift > cov_shift_threshold:
+        if pattern == "RELATIONSHIP_FORMATION":
+            direction = "diverging"
+        elif relationship_shift or status in ("CONFIRMED_CHANGE", "ALERT", "ALERT_HELD"):
+            direction = "diverging"
 
     return {
         "direction": direction,
