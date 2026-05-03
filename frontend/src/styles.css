@@ -289,3 +289,8 @@ input:focus,select:focus{outline:none;border-color:var(--blue)}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:rgba(70,130,200,.25);border-radius:3px}
 ::-webkit-scrollbar-thumb:hover{background:rgba(70,130,200,.45)}
+
+/* ── Replay progress bar ────────────────────────────────────────────────────── */
+.replay-progress{position:relative;width:120px;height:20px;background:var(--bg2);border:1px solid var(--border);border-radius:3px;overflow:hidden;flex-shrink:0}
+.replay-bar{position:absolute;left:0;top:0;height:100%;background:var(--blue);opacity:.55;transition:width .3s}
+.replay-label{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--txt2);white-space:nowrap;padding:0 4px}

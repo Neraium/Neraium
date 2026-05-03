@@ -101,8 +101,8 @@ function emptyMachine() {
 
 // ── Correlation matrix from signal history ────────────────────────────────────
 
-function computeCorrMatrix(sigHistory, n = 30) {
-  const cols = SIGNAL_NAMES.map(name => (sigHistory?.[name] || []).slice(-n));
+function computeCorrMatrix(sigHistory, n = 30, signals = SIGNAL_NAMES) {
+  const cols = signals.map(name => (sigHistory?.[name] || []).slice(-n));
   const minLen = Math.min(...cols.map(c => c.length));
   if (minLen < 2) return null;
   const data = cols.map(c => c.slice(-minLen));
@@ -166,10 +166,11 @@ function drawEllipse(ctx, e, toX, toY, color) {
 
 // ── CovarianceChart ───────────────────────────────────────────────────────────
 
-function CovarianceChart({ sigHistory, highlightPair }) {
+function CovarianceChart({ sigHistory, highlightPair, signals }) {
   const canvasRef = useRef(null);
-  const xs = sigHistory?.spindle_vibration || [];
-  const ys = sigHistory?.spindle_motor_current || [];
+  const sigKeys = signals || SIGNAL_NAMES;
+  const xs = sigHistory?.[sigKeys[0]] || [];
+  const ys = sigHistory?.[sigKeys[1]] || [];
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -760,9 +761,10 @@ function DriftChart({ driftHistory, milestones }) {
 
 // ── CorrelationHeatmap ────────────────────────────────────────────────────────
 
-function CorrelationHeatmap({ sigHistory }) {
-  const corr = computeCorrMatrix(sigHistory);
-  const SHORT = ["SV", "SMC", "CF", "ASL", "CZT"];
+function CorrelationHeatmap({ sigHistory, signals }) {
+  const sigKeys = (signals || SIGNAL_NAMES).slice(0, 5);
+  const corr = computeCorrMatrix(sigHistory, 30, sigKeys);
+  const SHORT = sigKeys.map(k => k.replace(/_/g, " ").split(" ").map(w => w[0]?.toUpperCase()).join(""));
 
   function cellColor(v) {
     if (v === null) return "#162035";
@@ -777,10 +779,10 @@ function CorrelationHeatmap({ sigHistory }) {
       <div className="heatmap-grid">
         <div className="hm-corner" />
         {SHORT.map(s => <div key={s} className="hm-label hm-col-label">{s}</div>)}
-        {SIGNAL_NAMES.map((_, i) => (
+        {sigKeys.map((_, i) => (
           <>
             <div key={`row-${i}`} className="hm-label hm-row-label">{SHORT[i]}</div>
-            {SIGNAL_NAMES.map((__, j) => {
+            {sigKeys.map((__, j) => {
               const v = corr ? corr[i][j] : null;
               return (
                 <div
@@ -850,16 +852,19 @@ function ConfidenceBar({ value }) {
 
 // ── TelemetryStrip ────────────────────────────────────────────────────────────
 
-function TelemetryStrip({ sigs, sigHistory }) {
+function TelemetryStrip({ sigs, sigHistory, signals, signalLabels }) {
+  const keys   = signals || SIGNAL_NAMES;
+  const labels = signalLabels || SIGNAL_LABELS;
   return (
     <div className="telemetry-strip">
-      {SIGNAL_NAMES.map(name => {
-        const v = sigs?.[name];
+      {keys.map(name => {
+        const v    = sigs?.[name];
         const hist = (sigHistory?.[name] || []).slice(-40);
+        const lbl  = labels[name] || name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
         return (
           <div key={name} className="telem-cell">
-            <div className="telem-name">{SIGNAL_LABELS[name]}</div>
-            <div className="telem-val">{v != null ? fmt(v, 3) : "—"}</div>
+            <div className="telem-name">{lbl}</div>
+            <div className="telem-val">{v != null && !isNaN(v) ? fmt(v, 3) : "—"}</div>
             {hist.length >= 2 && <Sparkline values={hist} color="#4682c8" height={28} />}
           </div>
         );
@@ -1042,7 +1047,7 @@ function MachineCard({ machine, data, onSelect }) {
 
 // ── DetailView ────────────────────────────────────────────────────────────────
 
-function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, onClose, machData, onSelectMachine }) {
+function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, onClose, machData, onSelectMachine, replaySession }) {
   const [hover, setHover] = useState(null);
   const op  = data?.out?.operator || {};
   const eng = data?.out?.engineer || {};
@@ -1051,6 +1056,9 @@ function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, o
   const confidence  = eng?.evidence?.confidence_score;
   const evidenceCount = eng?.evidence?.evidence_count;
   const phase = machineId === "CNC-01" ? demoPhaseLabel(data?.cycle ?? 0) : null;
+  const isReplayMachine = machineId === "CNC-01" && replaySession;
+  const activeSignals   = isReplayMachine ? replaySession.signals : SIGNAL_NAMES;
+  const activeLabels    = isReplayMachine ? replaySession.signalLabels : SIGNAL_LABELS;
 
   function exportBrief() {
     const brief = {
@@ -1101,12 +1109,12 @@ function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, o
       <div className="detail-grid">
         {/* Left column */}
         <div className="left-col">
-          <CovarianceChart sigHistory={data?.sigHistory} highlightPair={hover} />
+          <CovarianceChart sigHistory={data?.sigHistory} highlightPair={hover} signals={activeSignals} />
           <div className="metrics-row">
             <StructuralMetricsPanel engineer={eng} />
             <EvidenceFamiliesPanel engineer={eng} />
           </div>
-          <CorrelationHeatmap sigHistory={data?.sigHistory} />
+          <CorrelationHeatmap sigHistory={data?.sigHistory} signals={activeSignals} />
           <div className="note-banner">
             No individual signal threshold is required. Neraium detects structural relationship change.
           </div>
@@ -1135,7 +1143,7 @@ function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, o
       </div>
 
       {/* Telemetry + timeline */}
-      <TelemetryStrip sigs={data?.lastSigs} sigHistory={data?.sigHistory} />
+      <TelemetryStrip sigs={data?.lastSigs} sigHistory={data?.sigHistory} signals={activeSignals} signalLabels={activeLabels} />
       <StateTimeline history={data?.history || []} />
 
       {/* Engineer drawer */}
@@ -1155,19 +1163,22 @@ export default function App() {
   const [apiBase, setApiBase]         = useState(API_BASE);
   const [connected, setConnected]     = useState(false);
   const [error, setError]             = useState("");
-  const [csvRows, setCsvRows]         = useState([]);
   const [csvName, setCsvName]         = useState("");
   const [srcMode, setSrcMode]         = useState("demo"); // "demo" | "csv"
+  // replay session: { sessionId, totalRows, signals, signalLabels, platform } | null
+  const [replaySession, setReplaySession] = useState(null);
+  const [replayProgress, setReplayProgress] = useState({ current: 0, total: 0 });
 
-  const timerRef    = useRef(null);
-  const rngs        = useRef(Object.fromEntries(MACHINES.map((m, i) => [m.id, createRng(42 + i)])));
-  const cycles      = useRef(Object.fromEntries(MACHINES.map(m => [m.id, 0])));
-  const apiRef      = useRef(apiBase);
-  const srcRef      = useRef(srcMode);
-  const csvRef      = useRef(csvRows);
+  const timerRef      = useRef(null);
+  const rngs          = useRef(Object.fromEntries(MACHINES.map((m, i) => [m.id, createRng(42 + i)])));
+  const cycles        = useRef(Object.fromEntries(MACHINES.map(m => [m.id, 0])));
+  const apiRef        = useRef(apiBase);
+  const srcRef        = useRef(srcMode);
+  const replayRef     = useRef(replaySession);
 
-  useEffect(() => { apiRef.current = apiBase; }, [apiBase]);
-  useEffect(() => { srcRef.current = srcMode; }, [srcMode]);
+  useEffect(() => { apiRef.current    = apiBase; },       [apiBase]);
+  useEffect(() => { srcRef.current    = srcMode; },       [srcMode]);
+  useEffect(() => { replayRef.current = replaySession; }, [replaySession]);
   useEffect(() => { csvRef.current = csvRows; }, [csvRows]);
 
   useEffect(() => {
@@ -1195,43 +1206,61 @@ export default function App() {
   }, []);
 
   async function sendCycle() {
-    const base = apiRef.current;
+    const base    = apiRef.current;
+    const session = replayRef.current;
+    const isReplay = srcRef.current === "csv" && session;
+
     const results = await Promise.all(MACHINES.map(async m => {
-      const c = cycles.current[m.id];
-      let sigs;
-      if (m.id === "CNC-01" && srcRef.current === "csv" && csvRef.current.length > 0) {
-        sigs = csvRef.current[c % csvRef.current.length];
-        if (!sigs) return null;
+      const c   = cycles.current[m.id];
+      const isReplayMachine = isReplay && m.id === "CNC-01";
+
+      let out, sigs;
+
+      if (isReplayMachine) {
+        const res = await fetch(`${base}/replay/${session.sessionId}/tick`, { method: "POST" });
+        if (!res.ok) throw new Error(`/replay/tick → ${res.status}`);
+        const data = await res.json();
+        if (data.replay?.done || data.done) {
+          stopDemo();
+          return null;
+        }
+        out  = data;
+        sigs = data.signal_values || {};
+        setReplayProgress({ current: data.replay?.current_row ?? 0, total: data.replay?.total_rows ?? session.totalRows });
       } else {
         sigs = demoPacket(m.id, c, rngs.current[m.id]);
+        const body = { asset_id: m.id, signals: sigs, cycle: c, timestamp: new Date().toISOString() };
+        const res  = await fetch(`${base}/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(`/update → ${res.status}`);
+        out = await res.json();
       }
-      const body = { asset_id: m.id, signals: sigs, cycle: c, timestamp: new Date().toISOString() };
-      const res = await fetch(`${base}/update`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(`/update → ${res.status}`);
-      const out = await res.json();
+
       cycles.current[m.id] = c + 1;
-      return { id: m.id, c, out, sigs };
+      return { id: m.id, c, out, sigs, isReplay: isReplayMachine };
     }));
 
     const valid = results.filter(Boolean);
     if (!valid.length) { stopDemo(); return; }
     setConnected(true);
 
+    const activeSignals = (session?.signals) || SIGNAL_NAMES;
+
     setMachData(prev => {
       const next = { ...prev };
-      valid.forEach(({ id, c, out, sigs }) => {
-        const p = prev[id] || emptyMachine();
+      valid.forEach(({ id, c, out, sigs, isReplay: isRM }) => {
+        const p      = prev[id] || emptyMachine();
         const status = out?.operator?.status || "INITIALIZING";
-        const ms = { ...p.milestones };
+        const ms     = { ...p.milestones };
         if (!ms.baselineFormed && status !== "INITIALIZING") ms.baselineFormed = c;
         if (!ms.firstWatch && status === "WATCH")            ms.firstWatch = c;
         if (!ms.firstAlert && (status === "ALERT" || status === "ALERT_HELD")) ms.firstAlert = c;
 
-        const newSigH = Object.fromEntries(SIGNAL_NAMES.map(n => [
+        const sigKeys  = isRM ? activeSignals : SIGNAL_NAMES;
+        const newSigH  = Object.fromEntries(sigKeys.map(n => [
           n, [...(p.sigHistory[n] || []), sigs[n] ?? 0].slice(-120),
         ]));
 
@@ -1292,7 +1321,14 @@ export default function App() {
 
   async function handleReset() {
     stopDemo();
-    await fetch(`${apiBase}/reset`, { method: "POST" }).catch(() => {});
+    const session = replayRef.current;
+    await Promise.all([
+      fetch(`${apiBase}/reset`, { method: "POST" }).catch(() => {}),
+      session
+        ? fetch(`${apiBase}/replay/${session.sessionId}/reset`, { method: "POST" }).catch(() => {})
+        : Promise.resolve(),
+    ]);
+    setReplayProgress({ current: 0, total: session?.totalRows ?? 0 });
     setMachData(Object.fromEntries(MACHINES.map(m => [m.id, emptyMachine()])));
     setMachEvents(Object.fromEntries(MACHINES.map(m => [m.id, []])));
     MACHINES.forEach((m, i) => {
@@ -1302,22 +1338,34 @@ export default function App() {
     setError("");
   }
 
-  function handleCsvUpload(e) {
+  async function handleCsvUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
     setCsvName(file.name);
-    const reader = new FileReader();
-    reader.onload = ev => {
-      const lines = ev.target.result.trim().split("\n");
-      const headers = lines[0].split(",").map(h => h.trim());
-      const rows = lines.slice(1).map(line => {
-        const vals = line.split(",");
-        return Object.fromEntries(headers.map((h, i) => [h, parseFloat(vals[i])]));
-      }).filter(r => Object.values(r).every(v => !isNaN(v)));
-      setCsvRows(rows);
+    setError("");
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      const res = await fetch(`${apiBase}/replay/upload`, { method: "POST", body: form });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || "Upload failed");
+      }
+      const data = await res.json();
+      setReplaySession({
+        sessionId   : data.session_id,
+        totalRows   : data.total_rows,
+        signals     : data.signals,
+        signalLabels: data.signal_labels || {},
+        platform    : data.platform,
+        filename    : data.filename,
+      });
+      setReplayProgress({ current: 0, total: data.total_rows });
       setSrcMode("csv");
-    };
-    reader.readAsText(file);
+    } catch (err) {
+      setError(`CSV upload: ${err.message}`);
+      setSrcMode("demo");
+    }
   }
 
   // Event actions
@@ -1388,6 +1436,19 @@ export default function App() {
               <input type="file" accept=".csv" onChange={handleCsvUpload} style={{ display: "none" }} />
             </label>
           )}
+          {srcMode === "csv" && replaySession && replayProgress.total > 0 && (
+            <div className="replay-progress">
+              <div
+                className="replay-bar"
+                style={{ width: `${Math.round(replayProgress.current / replayProgress.total * 100)}%` }}
+              />
+              <span className="replay-label">
+                {replayProgress.current}/{replayProgress.total}
+                {replaySession.platform && replaySession.platform !== "Unknown"
+                  ? ` · ${replaySession.platform}` : ""}
+              </span>
+            </div>
+          )}
         </div>
         <div className="ctrl-right">
           <button onClick={handleReset} className="btn-reset">Reset</button>
@@ -1429,6 +1490,7 @@ export default function App() {
           onClose={() => handleClose(selected)}
           machData={machData}
           onSelectMachine={setSelected}
+          replaySession={replaySession}
         />
       )}
     </div>
