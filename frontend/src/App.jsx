@@ -89,9 +89,10 @@ function emptyMachine() {
   return {
     out: { operator: { status: "INITIALIZING" }, engineer: { status: "INITIALIZING" } },
     cycle: 0,
-    history: [],            // [{cycle, status}]
-    driftHistory: [],       // [{cycle, drift, watch, alert}]
-    sigHistory: Object.fromEntries(SIGNAL_NAMES.map(n => [n, []])), // last 120
+    history: [],
+    driftHistory: [],   // [{cycle, drift, watch, alert}]
+    corrHistory: [],    // [{cycle, corr}]  — spindle pair correlation over time
+    sigHistory: Object.fromEntries(SIGNAL_NAMES.map(n => [n, []])),
     lastSigs: null,
     milestones: { baselineFormed: null, firstWatch: null, firstAlert: null },
     lastStatus: "INITIALIZING",
@@ -418,6 +419,189 @@ function OperatorPanel({ operator, engineer, onHoverSignal }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── CorrTrendChart ────────────────────────────────────────────────────────────
+
+function CorrTrendChart({ corrHistory, milestones }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    const W = rect.width, H = rect.height;
+    ctx.fillStyle = "#060a1a";
+    ctx.fillRect(0, 0, W, H);
+
+    if (!corrHistory || corrHistory.length < 2) {
+      ctx.fillStyle = "#3a4a6a";
+      ctx.font = "12px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Awaiting correlation data…", W / 2, H / 2);
+      return;
+    }
+
+    const mg = { l: 36, r: 16, t: 24, b: 28 };
+    const pw = W - mg.l - mg.r, ph = H - mg.t - mg.b;
+    const n = corrHistory.length;
+    const toX = i => mg.l + (i / (n - 1)) * pw;
+    const toY = v => mg.t + ph - ((v + 1) / 2) * ph; // maps [-1,1] → [bottom,top]
+
+    // Grid & zero line
+    ctx.strokeStyle = "#1a2540"; ctx.lineWidth = 1;
+    [-1, -0.5, 0, 0.5, 1].forEach(v => {
+      const y = toY(v);
+      ctx.beginPath(); ctx.moveTo(mg.l, y); ctx.lineTo(mg.l + pw, y); ctx.stroke();
+      ctx.fillStyle = "#2a3a5a"; ctx.font = "9px sans-serif"; ctx.textAlign = "right";
+      ctx.fillText(v.toFixed(1), mg.l - 4, y + 3);
+    });
+
+    // Zero line accent
+    ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(mg.l, toY(0)); ctx.lineTo(mg.l + pw, toY(0)); ctx.stroke();
+
+    // Baseline corr reference
+    const baselineCorr = corrHistory.find(e => e.baseline != null)?.baseline;
+    if (baselineCorr != null) {
+      const yb = toY(baselineCorr);
+      ctx.setLineDash([4, 4]); ctx.strokeStyle = "rgba(70,130,200,0.4)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(mg.l, yb); ctx.lineTo(mg.l + pw, yb); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(70,130,200,0.6)"; ctx.font = "9px sans-serif"; ctx.textAlign = "left";
+      ctx.fillText("baseline", mg.l + 4, yb - 3);
+    }
+
+    // Coupling start marker
+    if (milestones?.firstWatch != null) {
+      const idx = corrHistory.findIndex(e => e.cycle >= milestones.firstWatch);
+      if (idx >= 0) {
+        const x = toX(idx);
+        ctx.strokeStyle = "rgba(255,184,77,0.4)"; ctx.lineWidth = 1.5; ctx.setLineDash([]);
+        ctx.beginPath(); ctx.moveTo(x, mg.t); ctx.lineTo(x, mg.t + ph); ctx.stroke();
+      }
+    }
+
+    // Correlation line — color shifts from blue→orange as it rises
+    for (let i = 1; i < n; i++) {
+      const v = corrHistory[i].corr ?? 0;
+      const frac = Math.max(0, Math.min(1, (v + 1) / 2));
+      const r = Math.round(70 + (255 - 70) * frac);
+      const g = Math.round(130 + (140 - 130) * frac);
+      const b = Math.round(200 + (0 - 200) * frac);
+      ctx.strokeStyle = `rgba(${r},${g},${b},0.9)`;
+      ctx.lineWidth = 2;
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(toX(i - 1), toY(corrHistory[i - 1].corr ?? 0));
+      ctx.lineTo(toX(i), toY(v));
+      ctx.stroke();
+    }
+
+    // Last value label
+    const last = corrHistory[n - 1].corr ?? 0;
+    ctx.fillStyle = last > 0.6 ? "#ff8c00" : "#7aacec";
+    ctx.font = "bold 11px sans-serif"; ctx.textAlign = "left";
+    ctx.fillText(`${last >= 0 ? "+" : ""}${last.toFixed(3)}`, mg.l + pw + 4, toY(last) + 4);
+
+    // Title
+    ctx.fillStyle = "#a3c4e0"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "left";
+    ctx.fillText("Spindle Vibration × Spindle Motor Current — correlation", mg.l, 16);
+  }, [corrHistory, milestones]);
+
+  return (
+    <div className="corr-trend-wrap">
+      <canvas ref={ref} style={{ width: "100%", height: "100%", display: "block" }} />
+    </div>
+  );
+}
+
+// ── PersistenceGate ───────────────────────────────────────────────────────────
+
+function PersistenceGate({ evidenceCount, persistenceWindow = 5, minHits = 3 }) {
+  const count = evidenceCount ?? 0;
+  const satisfied = count >= minHits;
+  return (
+    <div className="persistence-gate">
+      <div className="pg-label">
+        Persistence gate
+        <span className="pg-rule">{minHits}-of-{persistenceWindow}</span>
+      </div>
+      <div className="pg-slots">
+        {Array.from({ length: persistenceWindow }, (_, i) => (
+          <div
+            key={i}
+            className={`pg-slot ${i < count ? (satisfied ? "pg-hit-ok" : "pg-hit") : "pg-miss"}`}
+            title={i < count ? "above alert threshold" : "below threshold"}
+          />
+        ))}
+      </div>
+      <div className={`pg-status ${satisfied ? "pg-satisfied" : "pg-pending"}`}>
+        {satisfied ? "✓ Satisfied" : `${count} / ${minHits} needed`}
+      </div>
+    </div>
+  );
+}
+
+// ── ContributionBars ──────────────────────────────────────────────────────────
+
+function ContributionBars({ engineer }) {
+  const sigs = engineer?.contributors?.top_signals || [];
+  if (!sigs.length) return null;
+  const max = Math.max(...sigs.map(s => s.contribution || 0), 0.001);
+  return (
+    <div className="panel contrib-panel">
+      <h3 className="panel-title">Signal Contributions</h3>
+      <div className="contrib-list">
+        {sigs.map((s, i) => {
+          const pct = ((s.contribution || 0) / max) * 100;
+          const colors = ["#ff8c00", "#4682c8", "#4ade80"];
+          return (
+            <div key={i} className="contrib-row">
+              <div className="contrib-name">{s.signal}</div>
+              <div className="contrib-track">
+                <div
+                  className="contrib-fill"
+                  style={{ width: `${pct}%`, background: colors[i] || "#4682c8" }}
+                />
+              </div>
+              <div className="contrib-pct">{(s.contribution * 100).toFixed(1)}%</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── MachineStatusBar ──────────────────────────────────────────────────────────
+
+function MachineStatusBar({ machData, selectedId, onSelect }) {
+  return (
+    <div className="machine-status-bar">
+      {MACHINES.map(m => {
+        const d = machData[m.id];
+        const status = d?.lastStatus || "INITIALIZING";
+        const isSelected = m.id === selectedId;
+        return (
+          <button
+            key={m.id}
+            className={`msb-cell ${isSelected ? "msb-selected" : ""} msb-${status.toLowerCase()}`}
+            onClick={() => !isSelected && onSelect(m.id)}
+            title={`${m.id} — ${status}`}
+          >
+            <span className="msb-id">{m.id}</span>
+            <span className="msb-dot" />
+            <span className="msb-status">{status}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -858,17 +1042,37 @@ function MachineCard({ machine, data, onSelect }) {
 
 // ── DetailView ────────────────────────────────────────────────────────────────
 
-function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, onClose }) {
+function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, onClose, machData, onSelectMachine }) {
   const [hover, setHover] = useState(null);
   const op  = data?.out?.operator || {};
   const eng = data?.out?.engineer || {};
   const status = op.status || "INITIALIZING";
   const timeInState = eng?.evidence?.time_in_state;
   const confidence  = eng?.evidence?.confidence_score;
+  const evidenceCount = eng?.evidence?.evidence_count;
   const phase = machineId === "CNC-01" ? demoPhaseLabel(data?.cycle ?? 0) : null;
+
+  function exportBrief() {
+    const brief = {
+      machine: machineId,
+      cycle: data?.cycle,
+      timestamp: new Date().toISOString(),
+      operator: op,
+      engineer: eng,
+      milestones: data?.milestones,
+    };
+    const blob = new Blob([JSON.stringify(brief, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `neraium-brief-${machineId}-c${data?.cycle}.json`;
+    a.click();
+  }
 
   return (
     <div className={`detail-view ${status === "ALERT" || status === "ALERT_HELD" ? "state-alert-active" : ""}`}>
+      {/* Machine status bar */}
+      <MachineStatusBar machData={machData} selectedId={machineId} onSelect={onSelectMachine} />
+
       {/* Header */}
       <div className="detail-header">
         <button className="back-btn" onClick={onBack}>← Floor</button>
@@ -884,6 +1088,9 @@ function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, o
           )}
           {phase && <span className="demo-phase">{phase}</span>}
           <div className="dh-cycle muted">Cycle {data?.cycle ?? 0}</div>
+          <button className="btn-export" onClick={exportBrief} title="Download engineer brief as JSON">
+            ↓ Brief
+          </button>
         </div>
       </div>
 
@@ -908,7 +1115,9 @@ function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, o
         {/* Right column */}
         <div className="right-col">
           {confidence != null && <ConfidenceBar value={confidence} />}
+          <PersistenceGate evidenceCount={evidenceCount} persistenceWindow={5} minHits={3} />
           <OperatorPanel operator={op} engineer={eng} onHoverSignal={setHover} />
+          <ContributionBars engineer={eng} />
           <EventsPanel
             machineId={machineId}
             events={events}
@@ -919,8 +1128,11 @@ function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, o
         </div>
       </div>
 
-      {/* Drift chart */}
-      <DriftChart driftHistory={data?.driftHistory} milestones={data?.milestones} />
+      {/* Correlation trend + drift chart side by side */}
+      <div className="charts-row">
+        <CorrTrendChart corrHistory={data?.corrHistory} milestones={data?.milestones} />
+        <DriftChart driftHistory={data?.driftHistory} milestones={data?.milestones} />
+      </div>
 
       {/* Telemetry + timeline */}
       <TelemetryStrip sigs={data?.lastSigs} sigHistory={data?.sigHistory} />
@@ -1031,11 +1243,19 @@ export default function App() {
           alert: sm.alert_threshold ?? 0,
         };
 
+        const topRel = out?.engineer?.contributors?.top_relationships?.[0] || {};
+        const corrEntry = {
+          cycle: c,
+          corr: topRel.current_correlation ?? null,
+          baseline: topRel.baseline_correlation ?? null,
+        };
+
         next[id] = {
           out,
           cycle: c + 1,
           history: [...p.history, { cycle: c, status }].slice(-100),
           driftHistory: [...(p.driftHistory || []), driftEntry].slice(-150),
+          corrHistory: [...(p.corrHistory || []), corrEntry].filter(e => e.corr != null).slice(-150),
           sigHistory: newSigH,
           lastSigs: sigs,
           milestones: ms,
@@ -1148,6 +1368,7 @@ export default function App() {
           />
         </div>
         <div className="ctrl-center">
+          {running && <span className="live-dot" title="Recording" />}
           <button onClick={startDemo} disabled={running} className="btn-start">▶ Start</button>
           <button onClick={stopDemo} disabled={!running}>■ Stop</button>
           <select value={speed} onChange={e => setSpeed(e.target.value)} disabled={running}>
@@ -1206,6 +1427,8 @@ export default function App() {
           onAck={() => handleAck(selected)}
           onNote={t => handleNote(selected, t)}
           onClose={() => handleClose(selected)}
+          machData={machData}
+          onSelectMachine={setSelected}
         />
       )}
     </div>

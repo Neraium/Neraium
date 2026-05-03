@@ -186,6 +186,13 @@ input:focus,select:focus{outline:none;border-color:var(--blue)}
 .rel-shift{color:var(--blue2);font-family:"Courier New",monospace}
 .pattern-type{font-size:.92rem;color:var(--blue2);font-family:"Courier New",monospace}
 
+/* ── Charts row (corr trend + drift side by side) ───────────────────────────── */
+.charts-row{display:grid;grid-template-columns:1fr 1fr;flex-shrink:0}
+@media(max-width:900px){.charts-row{grid-template-columns:1fr}}
+
+/* ── Correlation trend chart ────────────────────────────────────────────────── */
+.corr-trend-wrap{height:160px;background:var(--bg0);border-top:1px solid var(--border);border-right:1px solid var(--border)}
+
 /* ── Drift chart ────────────────────────────────────────────────────────────── */
 .drift-chart-wrap{height:160px;background:var(--bg0);border-top:1px solid var(--border);border-bottom:1px solid var(--border);flex-shrink:0}
 
@@ -231,6 +238,51 @@ input:focus,select:focus{outline:none;border-color:var(--blue)}
 .dh-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
 .time-in-state{font-size:11px;padding:3px 8px;border:1px solid var(--border);border-radius:3px}
 .demo-phase{font-size:11px;padding:3px 10px;border:1px solid rgba(70,130,200,.3);border-radius:3px;color:var(--blue2);background:rgba(70,130,200,.06)}
+
+/* ── Persistence gate ───────────────────────────────────────────────────────── */
+.persistence-gate{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.pg-label{font-size:.75rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--amber);display:flex;justify-content:space-between;align-items:center}
+.pg-rule{font-family:"Courier New",monospace;font-size:.8rem;color:var(--txt3);font-weight:400;letter-spacing:0;text-transform:none}
+.pg-slots{display:flex;gap:6px;align-items:center}
+.pg-slot{flex:1;height:12px;border-radius:3px;border:1px solid var(--border2);transition:background .3s,box-shadow .3s}
+.pg-hit{background:rgba(255,184,77,.5);border-color:rgba(255,184,77,.6)}
+.pg-hit-ok{background:rgba(240,68,68,.7);border-color:rgba(240,68,68,.8);box-shadow:0 0 6px rgba(240,68,68,.4)}
+.pg-miss{background:rgba(255,255,255,.04)}
+.pg-status{font-size:.8rem;font-weight:600}
+.pg-satisfied{color:var(--red)}
+.pg-pending{color:var(--txt3)}
+
+/* ── Contribution bars ──────────────────────────────────────────────────────── */
+.contrib-panel{}
+.contrib-list{display:flex;flex-direction:column;gap:8px}
+.contrib-row{display:grid;grid-template-columns:140px 1fr 44px;gap:8px;align-items:center;font-size:.82rem}
+.contrib-name{color:var(--txt2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.contrib-track{height:8px;background:rgba(255,255,255,.06);border-radius:4px;overflow:hidden}
+.contrib-fill{height:100%;border-radius:4px;transition:width .4s ease}
+.contrib-pct{color:var(--txt3);font-family:"Courier New",monospace;text-align:right}
+
+/* ── Machine status bar ─────────────────────────────────────────────────────── */
+.machine-status-bar{display:flex;gap:0;background:rgba(0,0,0,.4);border-bottom:1px solid var(--border);flex-shrink:0}
+.msb-cell{flex:1;padding:6px 10px;border:none;border-right:1px solid var(--border);border-radius:0;background:transparent;display:flex;flex-direction:column;gap:2px;align-items:flex-start;cursor:pointer;transition:background .15s}
+.msb-cell:last-child{border-right:none}
+.msb-cell:hover:not(.msb-selected){background:rgba(255,255,255,.03)}
+.msb-selected{background:rgba(70,130,200,.08)}
+.msb-id{font-size:.75rem;font-weight:700;color:var(--amber);letter-spacing:.04em}
+.msb-status{font-size:.68rem;color:var(--txt3);text-transform:uppercase;letter-spacing:.04em}
+.msb-dot{width:6px;height:6px;border-radius:50%;position:absolute;right:8px;top:8px}
+.msb-cell{position:relative}
+.msb-alert .msb-dot,.msb-alert_held .msb-dot{background:var(--red);box-shadow:0 0 4px var(--red)}
+.msb-watch .msb-dot{background:var(--yellow)}
+.msb-stable .msb-dot{background:var(--green)}
+.msb-initializing .msb-dot{background:var(--txt3)}
+
+/* ── Live indicator ─────────────────────────────────────────────────────────── */
+@keyframes livePulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.7)}}
+.live-dot{width:8px;height:8px;border-radius:50%;background:var(--red);box-shadow:0 0 6px var(--red);animation:livePulse 1s ease-in-out infinite;flex-shrink:0}
+
+/* ── Export button ──────────────────────────────────────────────────────────── */
+.btn-export{font-size:11px;padding:4px 10px;border-color:var(--txt3)}
+.btn-export:hover{border-color:var(--blue);color:var(--blue2)}
 
 /* ── Scrollbar ──────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar{width:6px;height:6px}
