@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from neraium.config import NeraiumConfig
@@ -12,6 +13,13 @@ from neraium.engine import NeraiumEngine
 from neraium.system_output import build_system_output
 
 app = FastAPI(title="Neraium API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _config = NeraiumConfig()
 
