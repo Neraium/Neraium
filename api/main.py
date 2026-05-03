@@ -1,15 +1,24 @@
 # Run with:
 #   uvicorn api.main:app --reload --port 8000
 
+import io
 from datetime import datetime, timezone
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
+import pandas as pd
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from neraium.adapters.cannabis import (
+    build_cannabis_context,
+    detect_platform,
+    normalise_dataframe,
+)
 from neraium.config import NeraiumConfig
 from neraium.engine import NeraiumEngine
+from neraium.engineer import build_engineer_output
+from neraium.operator import build_operator_output
 from neraium.system_output import build_system_output
 
 app = FastAPI(title="Neraium API")
@@ -227,4 +236,69 @@ def get_event_brief(machine_id: str):
         },
         "notes": event["notes"],
         "not_claiming": "This does not identify an exact failed component or failure time.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cannabis / grow-room CSV ingestion
+# ---------------------------------------------------------------------------
+
+@app.post("/ingest/csv")
+async def ingest_csv(file: UploadFile = File(...)):
+    """
+    Upload any grow-room CSV (Aroya, TrolMaster, Growlink, Metrc, etc.).
+    Returns the first confirmed structural event found, or a no-event summary.
+
+    The engine processes every row sequentially and stops at the first ALERT,
+    returning operator + engineer output plus metadata about which signals
+    drove the change.
+    """
+    contents = await file.read()
+    try:
+        raw_df = pd.read_csv(io.BytesIO(contents))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse CSV: {exc}")
+
+    platform = detect_platform(raw_df)
+    df = normalise_dataframe(raw_df)
+
+    if df.empty:
+        raise HTTPException(
+            status_code=422,
+            detail="No numeric signals found after normalisation. Check column names.",
+        )
+
+    signal_names = df.columns.tolist()
+    context      = build_cannabis_context(df)
+    engine       = NeraiumEngine(NeraiumConfig(), signal_names=signal_names)
+
+    first_alert: dict | None = None
+
+    for row_idx, (_, row) in enumerate(df.iterrows()):
+        packet     = row.to_numpy(dtype=float)
+        engine_out = engine.update(packet)
+        status     = engine_out.get("status")
+
+        if status in ("ALERT", "ALERT_HELD"):
+            operator = build_operator_output(engine_out, sensor_context=context)
+            engineer = build_engineer_output(engine_out)
+            first_alert = {
+                "row": row_idx,
+                "status": status,
+                "operator": operator,
+                "engineer": engineer,
+            }
+            break
+
+    return {
+        "filename": file.filename,
+        "platform": platform,
+        "rows_processed": row_idx + 1 if first_alert else len(df),
+        "signals": signal_names,
+        "alert": first_alert,
+        "message": (
+            "Structural change detected."
+            if first_alert
+            else "No confirmed structural change found in this dataset."
+        ),
     }

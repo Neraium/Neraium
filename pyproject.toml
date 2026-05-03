@@ -8,7 +8,8 @@ dependencies = [
     "pandas",
     "fastapi",
     "httpx",
-    "pytest"
+    "pytest",
+    "python-multipart"
 ]
 
 [tool.pytest.ini_options]

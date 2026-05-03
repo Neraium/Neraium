@@ -24,7 +24,7 @@ fi
 cd "$APP_DIR"
 
 echo "=== Python deps ==="
-pip3 install --user uvicorn fastapi numpy pandas httpx
+pip3 install --user uvicorn fastapi numpy pandas httpx python-multipart
 
 echo "=== Build frontend ==="
 cd "$APP_DIR/frontend"
