@@ -1217,7 +1217,8 @@ export default function App() {
       let out, sigs;
 
       if (isReplayMachine) {
-        const res = await fetch(`${base}/replay/${session.sessionId}/tick`, { method: "POST" });
+        const n   = session.tickN ?? 1;
+        const res = await fetch(`${base}/replay/${session.sessionId}/tick?n=${n}`, { method: "POST" });
         if (!res.ok) throw new Error(`/replay/tick → ${res.status}`);
         const data = await res.json();
         if (data.replay?.done || data.done) {
@@ -1341,7 +1342,8 @@ export default function App() {
   async function handleCsvUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    setCsvName(file.name);
+    const mb = (file.size / 1048576).toFixed(1);
+    setCsvName(`${file.name} (uploading…)`);
     setError("");
     const form = new FormData();
     form.append("file", file);
@@ -1352,6 +1354,8 @@ export default function App() {
         throw new Error(err.detail || "Upload failed");
       }
       const data = await res.json();
+      // Server tells us rows per tick so any file size replays in ~200 ticks
+      const tickN = data.tick_n ?? Math.max(1, Math.ceil(data.total_rows / 200));
       setReplaySession({
         sessionId   : data.session_id,
         totalRows   : data.total_rows,
@@ -1359,11 +1363,14 @@ export default function App() {
         signalLabels: data.signal_labels || {},
         platform    : data.platform,
         filename    : data.filename,
+        tickN,
       });
       setReplayProgress({ current: 0, total: data.total_rows });
+      setCsvName(`${data.filename} (${data.total_rows.toLocaleString()} rows)`);
       setSrcMode("csv");
     } catch (err) {
       setError(`CSV upload: ${err.message}`);
+      setCsvName(file.name);
       setSrcMode("demo");
     }
   }
@@ -1436,19 +1443,21 @@ export default function App() {
               <input type="file" accept=".csv" onChange={handleCsvUpload} style={{ display: "none" }} />
             </label>
           )}
-          {srcMode === "csv" && replaySession && replayProgress.total > 0 && (
-            <div className="replay-progress">
-              <div
-                className="replay-bar"
-                style={{ width: `${Math.round(replayProgress.current / replayProgress.total * 100)}%` }}
-              />
-              <span className="replay-label">
-                {replayProgress.current}/{replayProgress.total}
-                {replaySession.platform && replaySession.platform !== "Unknown"
-                  ? ` · ${replaySession.platform}` : ""}
-              </span>
-            </div>
-          )}
+          {srcMode === "csv" && replaySession && replayProgress.total > 0 && (() => {
+            const pct  = Math.round(replayProgress.current / replayProgress.total * 100);
+            const big  = replayProgress.total > 9999;
+            const lbl  = big
+              ? `${pct}%  ·  ${replayProgress.current.toLocaleString()} / ${replayProgress.total.toLocaleString()}`
+              : `${replayProgress.current} / ${replayProgress.total}`;
+            const plat = replaySession.platform && replaySession.platform !== "Unknown"
+              ? ` · ${replaySession.platform}` : "";
+            return (
+              <div className="replay-progress">
+                <div className="replay-bar" style={{ width: `${pct}%` }} />
+                <span className="replay-label">{lbl}{plat}</span>
+              </div>
+            );
+          })()}
         </div>
         <div className="ctrl-right">
           <button onClick={handleReset} className="btn-reset">Reset</button>

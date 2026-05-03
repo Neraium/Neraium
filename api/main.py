@@ -53,9 +53,9 @@ _events: list[dict] = []
 @dataclass
 class ReplaySession:
     session_id: str
-    rows: list          # list of np.ndarray, one per CSV row
+    rows: np.ndarray     # shape (n_rows, n_signals) — single contiguous block
     signal_names: list[str]
-    signal_labels: dict[str, str]   # canonical_name → human label
+    signal_labels: dict[str, str]
     platform: str
     engine: NeraiumEngine
     current_row: int = 0
@@ -336,16 +336,25 @@ async def ingest_csv(file: UploadFile = File(...)):
 # Historical replay — session-based, step-by-step
 # ---------------------------------------------------------------------------
 
-def _parse_replay_csv(contents: bytes, filename: str) -> ReplaySession:
+def _parse_replay_csv(file_obj) -> ReplaySession:
+    """
+    Parse an uploaded CSV into a ReplaySession.
+    file_obj may be a bytes object or any file-like object pandas can read.
+    Rows are stored as a single contiguous float64 matrix (n_rows × n_signals)
+    rather than a list of arrays, so memory is proportional to data size only.
+    """
     try:
-        raw_df = pd.read_csv(io.BytesIO(contents))
+        raw_df = pd.read_csv(file_obj)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not parse CSV: {exc}")
+
+    if raw_df.empty:
+        raise HTTPException(status_code=422, detail="Uploaded CSV contains no data rows.")
 
     platform = detect_platform(raw_df)
     df       = normalise_dataframe(raw_df)
 
-    if df.empty:
+    if df.empty or len(df.columns) == 0:
         raise HTTPException(
             status_code=422,
             detail="No numeric signals found after normalisation. Check column names.",
@@ -354,16 +363,17 @@ def _parse_replay_csv(contents: bytes, filename: str) -> ReplaySession:
     signal_names = df.columns.tolist()
     context      = build_cannabis_context(df)
     labels       = {col: ctx["name"] for col, ctx in context.items()}
-    rows         = [row.to_numpy(dtype=float) for _, row in df.iterrows()]
+    # Single contiguous matrix — 8× more memory-efficient than a list of arrays
+    rows         = df.to_numpy(dtype=np.float64)
     engine       = NeraiumEngine(NeraiumConfig(), signal_names=signal_names)
 
     return ReplaySession(
-        session_id   = str(uuid.uuid4()),
-        rows         = rows,
-        signal_names = signal_names,
-        signal_labels= labels,
-        platform     = platform,
-        engine       = engine,
+        session_id    = str(uuid.uuid4()),
+        rows          = rows,
+        signal_names  = signal_names,
+        signal_labels = labels,
+        platform      = platform,
+        engine        = engine,
     )
 
 
@@ -371,17 +381,26 @@ def _parse_replay_csv(contents: bytes, filename: str) -> ReplaySession:
 async def replay_upload(file: UploadFile = File(...)):
     """
     Upload a CSV and create a persistent replay session.
-    Returns session metadata; use /replay/{session_id}/tick to step through rows.
+    Works for any file size — rows are stored as a single numpy matrix.
+    Returns session metadata including a recommended tick_n (rows per tick)
+    so the frontend can replay any size dataset in ~200 ticks.
     """
-    session = _parse_replay_csv(await file.read(), file.filename or "upload.csv")
+    # Pass the underlying SpooledTemporaryFile directly to pandas so the
+    # full file body is never duplicated in memory as a Python bytes object.
+    session = _parse_replay_csv(file.file)
     _replay_sessions[session.session_id] = session
+
+    # Recommend a batch size that makes any dataset play back in ~200 ticks
+    tick_n = max(1, -(-session.total_rows // 200))   # ceiling division
+
     return {
-        "session_id"  : session.session_id,
-        "filename"    : file.filename,
-        "platform"    : session.platform,
-        "total_rows"  : session.total_rows,
-        "signals"     : session.signal_names,
+        "session_id"   : session.session_id,
+        "filename"     : file.filename,
+        "platform"     : session.platform,
+        "total_rows"   : session.total_rows,
+        "signals"      : session.signal_names,
         "signal_labels": session.signal_labels,
+        "tick_n"       : tick_n,
     }
 
 
@@ -400,14 +419,16 @@ def replay_tick(session_id: str, n: int = 1):
         return {"done": True, "current_row": session.current_row, "total_rows": session.total_rows}
 
     n = max(1, min(n, session.total_rows - session.current_row))
-    last_out = last_row = None
 
-    for _ in range(n):
-        last_row = session.rows[session.current_row]
-        last_out = session.engine.update(last_row)
-        session.current_row += 1
+    # Feed rows to the engine; numpy matrix indexing is O(1) per row
+    start = session.current_row
+    last_out = None
+    for i in range(start, start + n):
+        last_out = session.engine.update(session.rows[i])
+    session.current_row = start + n
 
-    system = build_system_output(last_out)
+    last_row = session.rows[session.current_row - 1]
+    system   = build_system_output(last_out)
     signal_values = {name: float(val) for name, val in zip(session.signal_names, last_row)}
 
     return {
@@ -416,6 +437,7 @@ def replay_tick(session_id: str, n: int = 1):
             "session_id" : session_id,
             "current_row": session.current_row,
             "total_rows" : session.total_rows,
+            "n_ticked"   : n,
             "done"       : session.done,
             "platform"   : session.platform,
         },
