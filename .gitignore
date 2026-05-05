@@ -2,6 +2,9 @@ neraium.egg-info/
 __pycache__/
 *.pyc
 *.pyo
-__pycache__/
-*.pyc
-*.pyo
+node_modules/
+frontend/dist/
+.env
+.env.local
+*.env
+.DS_Store

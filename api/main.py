@@ -1,17 +1,36 @@
 # Run with:
 #   uvicorn api.main:app --reload --port 8000
 
+import io
+import uuid
 from datetime import datetime, timezone
+from dataclasses import dataclass, field
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
+import pandas as pd
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from neraium.adapters.cannabis import (
+    build_cannabis_context,
+    detect_platform,
+    normalise_dataframe,
+)
 from neraium.config import NeraiumConfig
 from neraium.engine import NeraiumEngine
+from neraium.engineer import build_engineer_output
+from neraium.operator import build_operator_output
 from neraium.system_output import build_system_output
 
 app = FastAPI(title="Neraium API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _config = NeraiumConfig()
 
@@ -25,6 +44,32 @@ MACHINES = {
 _engines: dict[str, NeraiumEngine] = {}
 _machine_status: dict[str, dict] = {}
 _events: list[dict] = []
+
+
+# ---------------------------------------------------------------------------
+# Replay session store
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ReplaySession:
+    session_id: str
+    rows: np.ndarray     # shape (n_rows, n_signals) — single contiguous block
+    signal_names: list[str]
+    signal_labels: dict[str, str]
+    platform: str
+    engine: NeraiumEngine
+    current_row: int = 0
+
+    @property
+    def total_rows(self) -> int:
+        return len(self.rows)
+
+    @property
+    def done(self) -> bool:
+        return self.current_row >= self.total_rows
+
+
+_replay_sessions: dict[str, ReplaySession] = {}
 
 
 def _get_engine(machine_id: str) -> NeraiumEngine:
@@ -220,3 +265,213 @@ def get_event_brief(machine_id: str):
         "notes": event["notes"],
         "not_claiming": "This does not identify an exact failed component or failure time.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Cannabis / grow-room CSV ingestion
+# ---------------------------------------------------------------------------
+
+@app.post("/ingest/csv")
+async def ingest_csv(file: UploadFile = File(...)):
+    """
+    Upload any grow-room CSV (Aroya, TrolMaster, Growlink, Metrc, etc.).
+    Returns the first confirmed structural event found, or a no-event summary.
+
+    The engine processes every row sequentially and stops at the first ALERT,
+    returning operator + engineer output plus metadata about which signals
+    drove the change.
+    """
+    contents = await file.read()
+    try:
+        raw_df = pd.read_csv(io.BytesIO(contents))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse CSV: {exc}")
+
+    platform = detect_platform(raw_df)
+    df = normalise_dataframe(raw_df)
+
+    if df.empty:
+        raise HTTPException(
+            status_code=422,
+            detail="No numeric signals found after normalisation. Check column names.",
+        )
+
+    signal_names = df.columns.tolist()
+    context      = build_cannabis_context(df)
+    engine       = NeraiumEngine(NeraiumConfig(), signal_names=signal_names)
+
+    first_alert: dict | None = None
+
+    for row_idx, (_, row) in enumerate(df.iterrows()):
+        packet     = row.to_numpy(dtype=float)
+        engine_out = engine.update(packet)
+        status     = engine_out.get("status")
+
+        if status in ("ALERT", "ALERT_HELD"):
+            operator = build_operator_output(engine_out, sensor_context=context)
+            engineer = build_engineer_output(engine_out)
+            first_alert = {
+                "row": row_idx,
+                "status": status,
+                "operator": operator,
+                "engineer": engineer,
+            }
+            break
+
+    return {
+        "filename": file.filename,
+        "platform": platform,
+        "rows_processed": row_idx + 1 if first_alert else len(df),
+        "signals": signal_names,
+        "alert": first_alert,
+        "message": (
+            "Structural change detected."
+            if first_alert
+            else "No confirmed structural change found in this dataset."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Historical replay — session-based, step-by-step
+# ---------------------------------------------------------------------------
+
+def _parse_replay_csv(file_obj) -> ReplaySession:
+    """
+    Parse an uploaded CSV into a ReplaySession.
+    file_obj may be a bytes object or any file-like object pandas can read.
+    Rows are stored as a single contiguous float64 matrix (n_rows × n_signals)
+    rather than a list of arrays, so memory is proportional to data size only.
+    """
+    try:
+        raw_df = pd.read_csv(file_obj)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse CSV: {exc}")
+
+    if raw_df.empty:
+        raise HTTPException(status_code=422, detail="Uploaded CSV contains no data rows.")
+
+    platform = detect_platform(raw_df)
+    df       = normalise_dataframe(raw_df)
+
+    if df.empty or len(df.columns) == 0:
+        raise HTTPException(
+            status_code=422,
+            detail="No numeric signals found after normalisation. Check column names.",
+        )
+
+    signal_names = df.columns.tolist()
+    context      = build_cannabis_context(df)
+    labels       = {col: ctx["name"] for col, ctx in context.items()}
+    # Single contiguous matrix — 8× more memory-efficient than a list of arrays
+    rows         = df.to_numpy(dtype=np.float64)
+    engine       = NeraiumEngine(NeraiumConfig(), signal_names=signal_names)
+
+    return ReplaySession(
+        session_id    = str(uuid.uuid4()),
+        rows          = rows,
+        signal_names  = signal_names,
+        signal_labels = labels,
+        platform      = platform,
+        engine        = engine,
+    )
+
+
+@app.post("/replay/upload")
+async def replay_upload(file: UploadFile = File(...)):
+    """
+    Upload a CSV and create a persistent replay session.
+    Works for any file size — rows are stored as a single numpy matrix.
+    Returns session metadata including a recommended tick_n (rows per tick)
+    so the frontend can replay any size dataset in ~200 ticks.
+    """
+    # Pass the underlying SpooledTemporaryFile directly to pandas so the
+    # full file body is never duplicated in memory as a Python bytes object.
+    session = _parse_replay_csv(file.file)
+    _replay_sessions[session.session_id] = session
+
+    # Recommend a batch size that makes any dataset play back in ~200 ticks
+    tick_n = max(1, -(-session.total_rows // 200))   # ceiling division
+
+    return {
+        "session_id"   : session.session_id,
+        "filename"     : file.filename,
+        "platform"     : session.platform,
+        "total_rows"   : session.total_rows,
+        "signals"      : session.signal_names,
+        "signal_labels": session.signal_labels,
+        "tick_n"       : tick_n,
+    }
+
+
+@app.post("/replay/{session_id}/tick")
+def replay_tick(session_id: str, n: int = 1):
+    """
+    Advance the replay by n rows (default 1).
+    Returns engine output in the same shape as /update plus replay progress fields.
+    When the dataset is exhausted, returns {done: true} with no engine output.
+    """
+    session = _replay_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Replay session not found")
+
+    if session.done:
+        return {"done": True, "current_row": session.current_row, "total_rows": session.total_rows}
+
+    n = max(1, min(n, session.total_rows - session.current_row))
+
+    # Feed rows to the engine; numpy matrix indexing is O(1) per row
+    start = session.current_row
+    last_out = None
+    for i in range(start, start + n):
+        last_out = session.engine.update(session.rows[i])
+    session.current_row = start + n
+
+    last_row = session.rows[session.current_row - 1]
+    system   = build_system_output(last_out)
+    signal_values = {name: float(val) for name, val in zip(session.signal_names, last_row)}
+
+    return {
+        **system,
+        "replay": {
+            "session_id" : session_id,
+            "current_row": session.current_row,
+            "total_rows" : session.total_rows,
+            "n_ticked"   : n,
+            "done"       : session.done,
+            "platform"   : session.platform,
+        },
+        "signal_values": signal_values,
+    }
+
+
+@app.get("/replay/{session_id}/status")
+def replay_status(session_id: str):
+    session = _replay_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Replay session not found")
+    return {
+        "session_id"   : session_id,
+        "platform"     : session.platform,
+        "current_row"  : session.current_row,
+        "total_rows"   : session.total_rows,
+        "done"         : session.done,
+        "signals"      : session.signal_names,
+        "signal_labels": session.signal_labels,
+    }
+
+
+@app.post("/replay/{session_id}/reset")
+def replay_reset(session_id: str):
+    session = _replay_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Replay session not found")
+    session.engine      = NeraiumEngine(NeraiumConfig(), signal_names=session.signal_names)
+    session.current_row = 0
+    return {"status": "reset", "session_id": session_id, "total_rows": session.total_rows}
+
+
+@app.delete("/replay/{session_id}")
+def replay_delete(session_id: str):
+    _replay_sessions.pop(session_id, None)
+    return {"status": "deleted", "session_id": session_id}

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 
-// ── Constants ──────────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const API_BASE = import.meta.env.VITE_NERAIUM_API_BASE || "/api";
+const BASELINE_N = 50;
 
 const SIGNAL_NAMES = [
   "spindle_vibration",
@@ -12,631 +13,13 @@ const SIGNAL_NAMES = [
   "cutting_zone_temperature",
 ];
 
-const SIGNAL_DISPLAY = {
+const SIGNAL_LABELS = {
   spindle_vibration: "Spindle Vibration",
   spindle_motor_current: "Spindle Motor Current",
   coolant_flow_rate: "Coolant Flow Rate",
   axis_servo_load: "Axis Servo Load",
   cutting_zone_temperature: "Cutting Zone Temp",
 };
-
-const DEMO_INTERVALS = { slow: 1000, normal: 450, fast: 150 };
-
-const EVIDENCE_FAMILIES = [
-  { key: "sensor_deviation", label: "Sensor deviation" },
-  { key: "relationship_shift", label: "Relationship shift" },
-  { key: "relational_stability_change", label: "Relational stability change" },
-  { key: "trajectory_pressure", label: "Trajectory pressure" },
-];
-
-// ── Data ───────────────────────────────────────────────────────────────────────
-
-function emptyMachineRecord() {
-  return {
-    systemOutput: {
-      operator: { status: "INITIALIZING" },
-      engineer: { status: "INITIALIZING" },
-    },
-    cycle: 0,
-    history: [],
-    signalHistory: Object.fromEntries(SIGNAL_NAMES.map((n) => [n, []])),
-    lastSignals: null,
-    lastUpdate: null,
-    milestones: { baselineFormed: null, firstWatch: null, firstAlert: null },
-    stateHistory: [],
-    lastStatus: "INITIALIZING",
-  };
-}
-
-// ── RNG + demo data ────────────────────────────────────────────────────────────
-
-function createRng(seed = 42) {
-  let state = seed >>> 0;
-  return () => {
-    state = (1664525 * state + 1013904223) >>> 0;
-    return state / 4294967296;
-  };
-}
-
-function normal(rng, mean = 0, std = 1) {
-  const u1 = Math.max(rng(), Number.EPSILON);
-  const u2 = rng();
-  return mean + std * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-}
-
-function demoPacketCNC01(cycle, rng) {
-  const s = {
-    spindle_vibration: normal(rng, 0, 1),
-    spindle_motor_current: normal(rng, 0, 1),
-    coolant_flow_rate: normal(rng, 0, 1),
-    axis_servo_load: normal(rng, 0, 1),
-    cutting_zone_temperature: normal(rng, 0, 1),
-  };
-  if (cycle >= 70) {
-    const progress = (cycle - 70) / 120;
-    const shared = normal(rng, 0, 1);
-    const coupling = 0.35 + 1.25 * progress;
-    const drift = 0.02 * (cycle - 70);
-    s.spindle_vibration = coupling * shared + drift;
-    s.spindle_motor_current = coupling * shared + normal(rng, 0, 0.04) + drift;
-  }
-  return SIGNAL_NAMES.reduce((o, n) => { o[n] = s[n]; return o; }, {});
-}
-
-function demoPacketStable(rng) {
-  return SIGNAL_NAMES.reduce((o, n) => { o[n] = normal(rng, 0, 1); return o; }, {});
-}
-
-// ── HTTP ───────────────────────────────────────────────────────────────────────
-
-async function postJson(path, payload, base) {
-  const r = await fetch(`${base}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) throw new Error(`${path} → ${r.status}`);
-  return r.json();
-}
-
-async function getJson(path, base) {
-  const r = await fetch(`${base}${path}`);
-  if (!r.ok) throw new Error(`${path} → ${r.status}`);
-  return r.json();
-}
-
-async function doReset(base, machineId = null) {
-  const url = machineId
-    ? `${base}/reset?asset_id=${encodeURIComponent(machineId)}`
-    : `${base}/reset`;
-  const r = await fetch(url, { method: "POST" });
-  if (!r.ok) throw new Error(`reset → ${r.status}`);
-  return r.json();
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-function fmt(v, dec = 3) {
-  if (typeof v !== "number" || Number.isNaN(v)) return "—";
-  return v.toFixed(dec);
-}
-
-function getActionWindow(trajectory, evidence) {
-  // Only show action window if diverging
-  if (!trajectory || trajectory.direction !== "diverging") {
-    return null;
-  }
-
-  const velocity = trajectory.drift_velocity || 0;
-  const acceleration = trajectory.drift_acceleration || 0;
-  const persistenceSatisfied = evidence?.persistence_satisfied ?? false;
-
-  // Categorize based on velocity and acceleration
-  let window, confidence;
-  if (velocity > 0.1 && acceleration > 0.01) {
-    window = "0–30 cycles";
-    confidence = "high";
-  } else if (velocity > 0.05) {
-    window = "30–80 cycles";
-    confidence = "moderate";
-  } else {
-    window = "80–150 cycles";
-    confidence = "low";
-  }
-
-  const basis = `${
-    trajectory.direction === "diverging"
-      ? "Sustained divergence"
-      : "System changing"
-  }${persistenceSatisfied ? " with sustained evidence" : ""}`;
-
-  return { window, confidence, basis };
-}
-
-// ── Components ──────────────────────────────────────────────────────────────────
-
-function CovarianceChart({ engineer }) {
-  const canvasRef = useRef(null);
-
-  useEffect(() => {
-    if (!canvasRef.current) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    canvas.width = canvas.offsetWidth * window.devicePixelRatio;
-    canvas.height = canvas.offsetHeight * window.devicePixelRatio;
-    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-
-    const rect = canvas.getBoundingClientRect();
-    const w = rect.width;
-    const h = rect.height;
-
-    // Clear
-    ctx.fillStyle = "#0a0e27";
-    ctx.fillRect(0, 0, w, h);
-
-    // Title
-    ctx.fillStyle = "#a3e0e0";
-    ctx.font = "14px -apple-system, BlinkMacSystemFont, sans-serif";
-    ctx.fillText("Cross-signal covariance shift detected", 20, 25);
-
-    // Axes
-    const margin = 50;
-    const plotW = w - margin * 2;
-    const plotH = h - margin * 2;
-
-    ctx.strokeStyle = "#444";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(margin, h - margin);
-    ctx.lineTo(w - margin, h - margin);
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.moveTo(margin, margin);
-    ctx.lineTo(margin, h - margin);
-    ctx.stroke();
-
-    // Axis labels
-    ctx.fillStyle = "#888";
-    ctx.font = "12px -apple-system, BlinkMacSystemFont, sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText("Spindle Vibration", margin + plotW / 2, h - 10);
-    ctx.save();
-    ctx.translate(15, margin + plotH / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.fillText("Spindle Motor Current", 0, 0);
-    ctx.restore();
-
-    // Sample points (mock data: baseline vs current)
-    const scale = 0.3;
-    const samples = 20;
-
-    // Baseline points (blue)
-    ctx.fillStyle = "rgba(70, 130, 200, 0.5)";
-    for (let i = 0; i < samples; i++) {
-      const x = Math.random() - 0.5;
-      const y = Math.random() - 0.5;
-      const px = margin + (x + 0.5) * scale * plotW;
-      const py = h - margin - (y + 0.5) * scale * plotH;
-      ctx.beginPath();
-      ctx.arc(px, py, 2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // Current points (orange)
-    ctx.fillStyle = "rgba(255, 140, 0, 0.7)";
-    for (let i = 0; i < samples; i++) {
-      const x = Math.random() - 0.4;
-      const y = Math.random() + 0.1;
-      const px = margin + (x + 0.5) * scale * plotW;
-      const py = h - margin - (y + 0.5) * scale * plotH;
-      ctx.beginPath();
-      ctx.arc(px, py, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // Legend
-    ctx.font = "12px -apple-system, BlinkMacSystemFont, sans-serif";
-    ctx.fillStyle = "#888";
-    ctx.textAlign = "left";
-
-    ctx.fillStyle = "rgba(70, 130, 200, 0.8)";
-    ctx.fillRect(w - 160, 30, 12, 12);
-    ctx.fillStyle = "#888";
-    ctx.fillText("Baseline", w - 140, 39);
-
-    ctx.fillStyle = "rgba(255, 140, 0, 0.8)";
-    ctx.fillRect(w - 160, 50, 12, 12);
-    ctx.fillStyle = "#888";
-    ctx.fillText("Current", w - 140, 59);
-  }, [engineer]);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      style={{ width: "100%", height: "100%", display: "block" }}
-    />
-  );
-}
-
-function StructuralMetrics({ engineer }) {
-  const rel = engineer?.contributors?.top_relationships?.[0] || {};
-  const metrics = engineer?.structural_metrics || {};
-
-  return (
-    <div className="metrics-panel">
-      <h3>Structural Metrics</h3>
-      <div className="metric-row">
-        <span className="label">Baseline correlation:</span>
-        <span className="value">{fmt(rel.baseline_correlation, 3)}</span>
-      </div>
-      <div className="metric-row">
-        <span className="label">Current correlation:</span>
-        <span className="value">{fmt(rel.current_correlation, 3)}</span>
-      </div>
-      <div className="metric-row">
-        <span className="label">Correlation shift:</span>
-        <span className="value">{fmt(rel.correlation_shift, 3)}</span>
-      </div>
-      <div className="metric-row">
-        <span className="label">Cov baseline:</span>
-        <span className="value">{fmt(rel.covariance_shift_abs, 4)}</span>
-      </div>
-      <div className="metric-row">
-        <span className="label">Cov current:</span>
-        <span className="value">{fmt(rel.covariance_shift_norm, 4)}</span>
-      </div>
-      <div className="metric-row">
-        <span className="label">Persistence satisfied:</span>
-        <span className="value evidence-indicator">
-          {engineer?.evidence?.persistence_satisfied ? "✓ Yes" : "— No"}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function EvidenceFamilies({ engineer }) {
-  const families = engineer?.evidence?.families || {};
-
-  return (
-    <div className="evidence-panel">
-      <h3>Active Evidence Families</h3>
-      <div className="family-list">
-        {EVIDENCE_FAMILIES.map((f) => (
-          <div key={f.key} className="family-item">
-            <input
-              type="checkbox"
-              checked={families[f.key] === true}
-              readOnly
-            />
-            <label>{f.label}</label>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function OperatorView({ operator, engineer }) {
-  const actionWindow = getActionWindow(operator?.trajectory, engineer?.evidence);
-
-  return (
-    <div className="operator-panel">
-      <div className="op-section">
-        <h4>What is happening</h4>
-        <p className="op-text">
-          {operator?.what_is_happening?.summary ||
-            "Waiting for structural change detection"}
-        </p>
-      </div>
-
-      <div className="op-section">
-        <h4>Where to look</h4>
-        <p className="op-text">
-          {operator?.where_to_look?.where_to_start ||
-            "Start inspection around the top reported signals"}
-        </p>
-      </div>
-
-      <div className="op-section">
-        <h4>Direction</h4>
-        <p className="op-text">
-          {operator?.trajectory?.direction === "diverging"
-            ? "System behavior moving away from baseline"
-            : operator?.trajectory?.direction === "stabilizing"
-            ? "System behavior moving back toward baseline"
-            : operator?.trajectory?.direction === "flat"
-            ? "System state remaining similar"
-            : "Trajectory unclear; additional observation required"}
-        </p>
-      </div>
-
-      <div className="op-section">
-        <h4>Urgency</h4>
-        <p className={`op-text urgency-${operator?.trajectory?.urgency || "low"}`}>
-          {operator?.trajectory?.urgency || "low"}
-        </p>
-      </div>
-
-      <div className="op-section">
-        <h4>Recommended next step</h4>
-        <p className="op-text">
-          {operator?.recommended_next_step === "INSPECT_TOP_SIGNALS_AND_RELATIONSHIPS"
-            ? "Inspect the top identified signals and their relationships"
-            : "Continue monitoring for structural changes"}
-        </p>
-      </div>
-
-      {actionWindow && (
-        <div className="action-window">
-          <h4>Action Window</h4>
-          <div className="aw-content">
-            <div className="aw-row">
-              <span className="aw-label">Cycles:</span>
-              <span className="aw-value">{actionWindow.window}</span>
-            </div>
-            <div className="aw-row">
-              <span className="aw-label">Confidence:</span>
-              <span className={`aw-value conf-${actionWindow.confidence}`}>
-                {actionWindow.confidence}
-              </span>
-            </div>
-            <div className="aw-basis">{actionWindow.basis}</div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TelemetryStrip({ signals }) {
-  return (
-    <div className="telemetry-strip">
-      {SIGNAL_NAMES.map((name) => {
-        const val = signals?.[name] ?? 0;
-        return (
-          <div key={name} className="signal-item">
-            <div className="signal-name">{SIGNAL_DISPLAY[name]}</div>
-            <div className="signal-value">{fmt(val, 2)}</div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function StateTimeline({ history }) {
-  const recentStates = history.slice(-50);
-
-  return (
-    <div className="timeline-container">
-      <h4>State History (last 50)</h4>
-      <div className="timeline-bar">
-        {recentStates.map((entry, idx) => {
-          const status = entry?.output?.operator?.status || "INITIALIZING";
-          let className = "state-dot";
-          if (
-            status === "ALERT" ||
-            status === "ALERT_HELD"
-          ) {
-            className += " state-alert";
-          } else if (status === "WATCH") {
-            className += " state-watch";
-          } else if (status === "STABLE") {
-            className += " state-stable";
-          } else {
-            className += " state-init";
-          }
-          return (
-            <div
-              key={idx}
-              className={className}
-              title={`${entry.cycle || idx}: ${status}`}
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function EngineerDrawer({ engineer, isOpen, onToggle }) {
-  const rel = engineer?.contributors?.top_relationships?.[0] || {};
-
-  return (
-    <div className={`engineer-drawer ${isOpen ? "open" : ""}`}>
-      <button className="drawer-toggle" onClick={onToggle}>
-        {isOpen ? "Hide" : "Show"} Engineer Metrics
-      </button>
-      {isOpen && (
-        <div className="drawer-content">
-          <div className="drawer-section">
-            <h4>Structural Metrics</h4>
-            <table className="metrics-table">
-              <tbody>
-                <tr>
-                  <td>Drift score:</td>
-                  <td>{fmt(engineer?.structural_drift_score, 3)}</td>
-                </tr>
-                <tr>
-                  <td>Relational stability:</td>
-                  <td>{fmt(engineer?.relational_stability_score, 3)}</td>
-                </tr>
-                <tr>
-                  <td>Watch threshold:</td>
-                  <td>{fmt(engineer?.watch_threshold, 3)}</td>
-                </tr>
-                <tr>
-                  <td>Alert threshold:</td>
-                  <td>{fmt(engineer?.alert_threshold, 3)}</td>
-                </tr>
-                <tr>
-                  <td>Confidence:</td>
-                  <td>{fmt(engineer?.confidence_score, 3)}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div className="drawer-section">
-            <h4>Trajectory Metrics</h4>
-            <table className="metrics-table">
-              <tbody>
-                <tr>
-                  <td>Drift velocity:</td>
-                  <td>{fmt(engineer?.trajectory?.drift_velocity, 4)}</td>
-                </tr>
-                <tr>
-                  <td>Drift acceleration:</td>
-                  <td>{fmt(engineer?.trajectory?.drift_acceleration, 4)}</td>
-                </tr>
-                <tr>
-                  <td>Direction:</td>
-                  <td>{engineer?.trajectory?.direction || "—"}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div className="drawer-section">
-            <h4>Evidence</h4>
-            <table className="metrics-table">
-              <tbody>
-                <tr>
-                  <td>Evidence count:</td>
-                  <td>{engineer?.evidence?.evidence_count || 0}</td>
-                </tr>
-                <tr>
-                  <td>Active families:</td>
-                  <td>
-                    {engineer?.evidence?.active_families?.length || 0} of{" "}
-                    {EVIDENCE_FAMILIES.length}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          {rel.pair && (
-            <div className="drawer-section">
-              <h4>Top Relationship</h4>
-              <p>{rel.pair.join(" ↔ ")}</p>
-              <table className="metrics-table">
-                <tbody>
-                  <tr>
-                    <td>Baseline corr:</td>
-                    <td>{fmt(rel.baseline_correlation, 3)}</td>
-                  </tr>
-                  <tr>
-                    <td>Current corr:</td>
-                    <td>{fmt(rel.current_correlation, 3)}</td>
-                  </tr>
-                  <tr>
-                    <td>Correlation shift:</td>
-                    <td>{fmt(rel.correlation_shift, 3)}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function DetailView({ machineData, machineId, onBack }) {
-  const [engineDrawerOpen, setEngineDrawerOpen] = useState(false);
-
-  const data = machineData;
-  const operator = data?.systemOutput?.operator || {};
-  const engineer = data?.systemOutput?.engineer || {};
-  const status = operator.status || "INITIALIZING";
-
-  return (
-    <div className="detail-view">
-      <div className="detail-header">
-        <button className="back-btn" onClick={onBack}>
-          ← Back
-        </button>
-        <div className="header-content">
-          <h1>Neraium</h1>
-          <h2>CNC Manufacturing Cell</h2>
-          <h3>Live Structural Intelligence</h3>
-        </div>
-        <div className="status-badge" data-status={status}>
-          {status}
-        </div>
-      </div>
-
-      <div className="main-grid">
-        <div className="left-panel">
-          <div className="chart-section">
-            <CovarianceChart engineer={engineer} />
-          </div>
-          <div className="metrics-section">
-            <StructuralMetrics engineer={engineer} />
-            <EvidenceFamilies engineer={engineer} />
-          </div>
-          <div className="note-section">
-            <p className="note-text">
-              No individual signal threshold is required. Neraium detects
-              structural relationship change.
-            </p>
-          </div>
-        </div>
-
-        <div className="right-panel">
-          <OperatorView operator={operator} engineer={engineer} />
-        </div>
-      </div>
-
-      <div className="telemetry-section">
-        <TelemetryStrip signals={data?.lastSignals} />
-      </div>
-
-      <div className="timeline-section">
-        <StateTimeline history={data?.history || []} />
-      </div>
-
-      <div className="engineer-section">
-        <EngineerDrawer
-          engineer={engineer}
-          isOpen={engineDrawerOpen}
-          onToggle={() => setEngineDrawerOpen(!engineDrawerOpen)}
-        />
-      </div>
-    </div>
-  );
-}
-
-function FloorView({ machines, onSelectMachine }) {
-  return (
-    <div className="floor-view">
-      <div className="floor-header">
-        <h1>Neraium</h1>
-        <h2>Manufacturing Floor</h2>
-      </div>
-      <div className="machines-grid">
-        {machines.map((m) => (
-          <button
-            key={m.id}
-            className="machine-btn"
-            onClick={() => onSelectMachine(m.id)}
-          >
-            <div className="machine-id">{m.id}</div>
-            <div className="machine-type">{m.type}</div>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── Main App ───────────────────────────────────────────────────────────────────
 
 const MACHINES = [
   { id: "CNC-01", type: "5-axis mill" },
@@ -645,206 +28,1480 @@ const MACHINES = [
   { id: "CNC-04", type: "grinding cell" },
 ];
 
-function App() {
-  const [selectedMachineId, setSelectedMachineId] = useState(null);
-  const [machineData, setMachineData] = useState(
-    Object.fromEntries(MACHINES.map((m) => [m.id, emptyMachineRecord()]))
-  );
-  const [isRunning, setIsRunning] = useState(false);
-  const [demoSpeed, setDemoSpeed] = useState("normal");
-  const [error, setError] = useState("");
-  const [backendConnected, setBackendConnected] = useState(false);
-  const [apiBase, setApiBase] = useState(API_BASE);
+const DEMO_SPEEDS = { slow: 1000, normal: 450, fast: 150 };
 
-  const timerRef = useRef(null);
-  const machineRngs = useRef(
-    Object.fromEntries(MACHINES.map((m, i) => [m.id, createRng(42 + i)]))
-  );
-  const machineCycles = useRef(Object.fromEntries(MACHINES.map((m) => [m.id, 0])));
-  const apiBaseRef = useRef(apiBase);
+const EVIDENCE_KEYS = [
+  { key: "sensor_deviation", label: "Sensor deviation" },
+  { key: "relationship_shift", label: "Relationship shift" },
+  { key: "relational_stability_change", label: "Relational stability change" },
+  { key: "trajectory_pressure", label: "Trajectory pressure" },
+];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function fmt(v, d = 3) {
+  return typeof v === "number" && !isNaN(v) ? v.toFixed(d) : "—";
+}
+
+function createRng(seed = 42) {
+  let s = seed >>> 0;
+  return () => { s = (1664525 * s + 1013904223) >>> 0; return s / 4294967296; };
+}
+
+function normal(rng, m = 0, sd = 1) {
+  const u1 = Math.max(rng(), 1e-15);
+  return m + sd * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * rng());
+}
+
+function demoPacket(machineId, cycle, rng) {
+  const s = Object.fromEntries(SIGNAL_NAMES.map(n => [n, normal(rng)]));
+  if (machineId === "CNC-01" && cycle >= 70) {
+    const prog = (cycle - 70) / 120;
+    const shared = normal(rng);
+    const k = 0.35 + 1.25 * prog;
+    const drift = 0.02 * (cycle - 70);
+    s.spindle_vibration = k * shared + drift;
+    s.spindle_motor_current = k * shared + normal(rng, 0, 0.04) + drift;
+  }
+  return s;
+}
+
+function actionWindow(trajectory, evidence) {
+  if (!trajectory || trajectory.direction !== "diverging") return null;
+  const v = trajectory.drift_velocity || 0;
+  const a = trajectory.drift_acceleration || 0;
+  const p = evidence?.persistence_satisfied ?? false;
+  let window, confidence;
+  if (v > 0.1 && a > 0.01)      { window = "0–30 cycles";   confidence = "high"; }
+  else if (v > 0.05)             { window = "30–80 cycles";  confidence = "moderate"; }
+  else                           { window = "80–150 cycles"; confidence = "low"; }
+  const basis = `Sustained divergence${p ? " with confirmed evidence" : ""}`;
+  return { window, confidence, basis };
+}
+
+function demoPhaseLabel(cycle) {
+  if (cycle < BASELINE_N) return `Baseline (${cycle}/${BASELINE_N})`;
+  if (cycle < 70) return "Stable";
+  return `Coupling active (+${cycle - 70})`;
+}
+
+function emptyMachine() {
+  return {
+    out: { operator: { status: "INITIALIZING" }, engineer: { status: "INITIALIZING" } },
+    cycle: 0,
+    history: [],
+    driftHistory: [],   // [{cycle, drift, watch, alert}]
+    corrHistory: [],    // [{cycle, corr}]  — spindle pair correlation over time
+    sigHistory: Object.fromEntries(SIGNAL_NAMES.map(n => [n, []])),
+    lastSigs: null,
+    milestones: { baselineFormed: null, firstWatch: null, firstAlert: null },
+    lastStatus: "INITIALIZING",
+  };
+}
+
+// ── Correlation matrix from signal history ────────────────────────────────────
+
+function computeCorrMatrix(sigHistory, n = 30, signals = SIGNAL_NAMES) {
+  const cols = signals.map(name => (sigHistory?.[name] || []).slice(-n));
+  const minLen = Math.min(...cols.map(c => c.length));
+  if (minLen < 2) return null;
+  const data = cols.map(c => c.slice(-minLen));
+  const means = data.map(d => d.reduce((s, v) => s + v, 0) / minLen);
+  return data.map((di, i) => data.map((dj, j) => {
+    if (i === j) return 1;
+    let sxy = 0, sxx = 0, syy = 0;
+    for (let k = 0; k < minLen; k++) {
+      sxy += (di[k] - means[i]) * (dj[k] - means[j]);
+      sxx += (di[k] - means[i]) ** 2;
+      syy += (dj[k] - means[j]) ** 2;
+    }
+    return sxx > 0 && syy > 0 ? sxy / Math.sqrt(sxx * syy) : 0;
+  }));
+}
+
+// ── Covariance ellipse math (canvas) ─────────────────────────────────────────
+
+function ellipseParams(pts) {
+  if (pts.length < 3) return null;
+  const mx = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+  const my = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+  let sxx = 0, sxy = 0, syy = 0;
+  for (const [x, y] of pts) {
+    sxx += (x - mx) ** 2;
+    sxy += (x - mx) * (y - my);
+    syy += (y - my) ** 2;
+  }
+  const n = pts.length - 1;
+  sxx /= n; sxy /= n; syy /= n;
+  // eigenvalues of [[sxx,sxy],[sxy,syy]]
+  const trace = sxx + syy;
+  const det = sxx * syy - sxy * sxy;
+  const disc = Math.max((trace / 2) ** 2 - det, 0);
+  const l1 = trace / 2 + Math.sqrt(disc);
+  const l2 = trace / 2 - Math.sqrt(disc);
+  const angle = Math.atan2(l1 - sxx, sxy);
+  const scale = Math.sqrt(5.991); // 95% CI chi2(2)
+  return { mx, my, a: scale * Math.sqrt(Math.max(l1, 0)), b: scale * Math.sqrt(Math.max(l2, 0)), angle };
+}
+
+function drawEllipse(ctx, e, toX, toY, color) {
+  if (!e || e.a < 1e-6 || e.b < 1e-6) return;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  const steps = 80;
+  for (let i = 0; i <= steps; i++) {
+    const t = (2 * Math.PI * i) / steps;
+    const lx = e.a * Math.cos(t);
+    const ly = e.b * Math.sin(t);
+    const rx = lx * Math.cos(e.angle) - ly * Math.sin(e.angle) + e.mx;
+    const ry = lx * Math.sin(e.angle) + ly * Math.cos(e.angle) + e.my;
+    i === 0 ? ctx.moveTo(toX(rx), toY(ry)) : ctx.lineTo(toX(rx), toY(ry));
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ── CovarianceChart ───────────────────────────────────────────────────────────
+
+function CovarianceChart({ sigHistory, highlightPair, signals }) {
+  const canvasRef = useRef(null);
+  const sigKeys = signals || SIGNAL_NAMES;
+  const xs = sigHistory?.[sigKeys[0]] || [];
+  const ys = sigHistory?.[sigKeys[1]] || [];
 
   useEffect(() => {
-    apiBaseRef.current = apiBase;
-  }, [apiBase]);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    const W = rect.width, H = rect.height;
 
-  useEffect(() => {
-    let active = true;
-    getJson("/health", apiBase)
-      .then(() => {
-        if (active) setBackendConnected(true);
-      })
-      .catch(() => {
-        if (active) setBackendConnected(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [apiBase]);
+    ctx.fillStyle = "#060a1a";
+    ctx.fillRect(0, 0, W, H);
 
-  useEffect(() => {
-    return () => stopDemo();
-  }, []);
-
-  async function sendAllCycles() {
-    const base = apiBaseRef.current;
-
-    const results = await Promise.all(
-      MACHINES.map(async (machine) => {
-        const cycle = machineCycles.current[machine.id];
-        const rng = machineRngs.current[machine.id];
-        let signals;
-        if (machine.id === "CNC-01") {
-          signals = demoPacketCNC01(cycle, rng);
-        } else {
-          signals = demoPacketStable(rng);
-        }
-        const ts = new Date().toISOString();
-        const packet = { asset_id: machine.id, signals, cycle, timestamp: ts };
-        const output = await postJson("/update", packet, base);
-        machineCycles.current[machine.id] = cycle + 1;
-        return { machineId: machine.id, cycle, output, signals };
-      })
-    );
-
-    const valid = results.filter(Boolean);
-    if (valid.length === 0) {
-      stopDemo();
+    const n = Math.min(xs.length, ys.length);
+    if (n < 3) {
+      ctx.fillStyle = "#3a4a6a";
+      ctx.font = "13px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(`Collecting baseline… (${n}/${BASELINE_N})`, W / 2, H / 2);
       return;
     }
 
-    setBackendConnected(true);
-    setMachineData((prev) => {
-      const next = { ...prev };
-      valid.forEach(({ machineId, cycle, output, signals }) => {
-        const p = prev[machineId] || emptyMachineRecord();
-        const newStatus = output.operator?.status || "INITIALIZING";
-        const pm = p.milestones || {
-          baselineFormed: null,
-          firstWatch: null,
-          firstAlert: null,
-        };
-        const milestones = { ...pm };
-        if (milestones.baselineFormed === null && newStatus !== "INITIALIZING")
-          milestones.baselineFormed = cycle;
-        if (milestones.firstWatch === null && newStatus === "WATCH")
-          milestones.firstWatch = cycle;
-        if (
-          milestones.firstAlert === null &&
-          (newStatus === "ALERT" || newStatus === "ALERT_HELD")
-        )
-          milestones.firstAlert = cycle;
+    const baseN = Math.min(BASELINE_N, Math.floor(n * 0.5));
+    const basePts = Array.from({ length: baseN }, (_, i) => [xs[i], ys[i]]);
+    const currPts = Array.from({ length: Math.min(20, n) }, (_, i) => [xs[n - 20 + i] ?? xs[i], ys[n - 20 + i] ?? ys[i]]);
 
-        next[machineId] = {
-          systemOutput: output,
-          cycle: cycle + 1,
-          history: [...(p.history || []), { cycle, output }].slice(-100),
-          lastSignals: signals,
-          lastUpdate: new Date().toISOString(),
-          milestones,
-          lastStatus: newStatus,
-        };
-      });
-      return next;
-    });
-  }
+    const allX = [...basePts, ...currPts].map(p => p[0]);
+    const allY = [...basePts, ...currPts].map(p => p[1]);
+    const margin = { l: 52, r: 20, t: 36, b: 44 };
+    const pw = W - margin.l - margin.r;
+    const ph = H - margin.t - margin.b;
+    const xmin = Math.min(...allX), xmax = Math.max(...allX);
+    const ymin = Math.min(...allY), ymax = Math.max(...allY);
+    const xpad = (xmax - xmin) * 0.15 || 0.5;
+    const ypad = (ymax - ymin) * 0.15 || 0.5;
+    const toX = v => margin.l + ((v - xmin + xpad) / (xmax - xmin + 2 * xpad)) * pw;
+    const toY = v => margin.t + ph - ((v - ymin + ypad) / (ymax - ymin + 2 * ypad)) * ph;
 
-  function startDemo() {
-    if (isRunning) return;
-    setIsRunning(true);
-    setError("");
-    const interval = DEMO_INTERVALS[demoSpeed] || DEMO_INTERVALS.normal;
-    timerRef.current = setInterval(() => {
-      sendAllCycles().catch((err) => {
-        setError(err.message);
-        stopDemo();
-      });
-    }, interval);
-  }
-
-  function stopDemo() {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
+    // Grid
+    ctx.strokeStyle = "#1a2540";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const x = margin.l + (i / 4) * pw;
+      ctx.beginPath(); ctx.moveTo(x, margin.t); ctx.lineTo(x, margin.t + ph); ctx.stroke();
+      const y = margin.t + (i / 4) * ph;
+      ctx.beginPath(); ctx.moveTo(margin.l, y); ctx.lineTo(margin.l + pw, y); ctx.stroke();
     }
-    setIsRunning(false);
-  }
 
-  async function handleReset() {
-    try {
-      setError("");
-      await doReset(apiBase, selectedMachineId || undefined);
-      setMachineData(
-        Object.fromEntries(MACHINES.map((m) => [m.id, emptyMachineRecord()]))
-      );
-      Object.keys(machineCycles.current).forEach(
-        (k) => (machineCycles.current[k] = 0)
-      );
-      Object.keys(machineRngs.current).forEach((k) => {
-        const idx = MACHINES.findIndex((m) => m.id === k);
-        machineRngs.current[k] = createRng(42 + idx);
-      });
-    } catch (err) {
-      setError(err.message);
+    // Axes
+    ctx.strokeStyle = "#2a3a5a";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(margin.l, margin.t); ctx.lineTo(margin.l, margin.t + ph); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(margin.l, margin.t + ph); ctx.lineTo(margin.l + pw, margin.t + ph); ctx.stroke();
+
+    // Ellipses
+    const baseE = ellipseParams(basePts);
+    const currE = ellipseParams(currPts);
+    drawEllipse(ctx, baseE, toX, toY, "rgba(70,130,220,0.7)");
+    drawEllipse(ctx, currE, toX, toY, "rgba(255,140,0,0.7)");
+
+    // Baseline points
+    ctx.fillStyle = "rgba(70,130,220,0.5)";
+    for (const [x, y] of basePts) {
+      ctx.beginPath(); ctx.arc(toX(x), toY(y), 2.5, 0, Math.PI * 2); ctx.fill();
     }
-  }
+
+    // Current points
+    ctx.fillStyle = "rgba(255,140,0,0.75)";
+    for (const [x, y] of currPts) {
+      ctx.beginPath(); ctx.arc(toX(x), toY(y), 3, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Labels
+    ctx.fillStyle = "#6a8aaa";
+    ctx.font = "11px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Spindle Vibration", margin.l + pw / 2, H - 8);
+    ctx.save();
+    ctx.translate(14, margin.t + ph / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("Spindle Motor Current", 0, 0);
+    ctx.restore();
+
+    // Title
+    ctx.fillStyle = "#a3c4e0";
+    ctx.font = "bold 12px sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText("Cross-signal covariance shift", margin.l, 22);
+
+    // Legend
+    const lx = W - 130;
+    ctx.fillStyle = "rgba(70,130,220,0.7)"; ctx.fillRect(lx, 10, 10, 10);
+    ctx.fillStyle = "#8aadca"; ctx.font = "11px sans-serif"; ctx.fillText("Baseline", lx + 14, 19);
+    ctx.fillStyle = "rgba(255,140,0,0.7)"; ctx.fillRect(lx, 26, 10, 10);
+    ctx.fillStyle = "#8aadca"; ctx.fillText("Current", lx + 14, 35);
+  }, [xs, ys, highlightPair]);
 
   return (
-    <div className="app">
-      <div className="app-controls">
-        <div className="controls-left">
-          <label>
-            API Base:
-            <input
-              type="text"
-              value={apiBase}
-              onChange={(e) => setApiBase(e.target.value)}
-            />
-          </label>
-          {!backendConnected && (
-            <span className="status-offline">Backend offline</span>
-          )}
-        </div>
-        <div className="controls-center">
-          <button onClick={startDemo} disabled={isRunning}>
-            Start Demo
-          </button>
-          <button onClick={stopDemo} disabled={!isRunning}>
-            Stop Demo
-          </button>
-          <label>
-            Speed:
-            <select
-              value={demoSpeed}
-              onChange={(e) => setDemoSpeed(e.target.value)}
-              disabled={isRunning}
-            >
-              <option value="slow">Slow</option>
-              <option value="normal">Normal</option>
-              <option value="fast">Fast</option>
-            </select>
-          </label>
-        </div>
-        <div className="controls-right">
-          <button onClick={handleReset}>Reset</button>
-        </div>
+    <div className="chart-wrap">
+      <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block" }} />
+    </div>
+  );
+}
+
+// ── StatusBadge ───────────────────────────────────────────────────────────────
+
+function StatusBadge({ status, size = "md" }) {
+  return <span className={`badge badge-${(status || "init").toLowerCase()} badge-${size}`}>{status || "—"}</span>;
+}
+
+// ── StructuralMetricsPanel ────────────────────────────────────────────────────
+
+function StructuralMetricsPanel({ engineer }) {
+  const sm = engineer?.structural_metrics || {};
+  const rel = engineer?.contributors?.top_relationships?.[0] || {};
+  const ev = engineer?.evidence || {};
+
+  return (
+    <div className="panel">
+      <h3 className="panel-title">Structural Metrics</h3>
+      <table className="kv-table">
+        <tbody>
+          <tr><td>Cov baseline</td><td>{fmt(rel.baseline_correlation, 4)}</td></tr>
+          <tr><td>Cov current</td><td>{fmt(rel.current_correlation, 4)}</td></tr>
+          <tr><td>ΔCov (shift norm)</td><td>{fmt(rel.covariance_shift_norm, 4)}</td></tr>
+          <tr><td>Corr baseline</td><td>{fmt(rel.baseline_correlation, 3)}</td></tr>
+          <tr><td>Corr current</td><td>{fmt(rel.current_correlation, 3)}</td></tr>
+          <tr><td>Corr shift</td><td>{fmt(rel.correlation_shift, 3)}</td></tr>
+          <tr><td>Drift score</td><td>{fmt(sm.structural_drift_score ?? sm.drift_score, 3)}</td></tr>
+          <tr><td>Rel stability</td><td>{fmt(sm.relational_stability, 3)}</td></tr>
+          <tr>
+            <td>Persistence</td>
+            <td className={ev.persistence_satisfied ? "val-ok" : "val-dim"}>
+              {ev.persistence_satisfied ? "✓ satisfied" : "— pending"}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ── EvidenceFamiliesPanel ─────────────────────────────────────────────────────
+
+function EvidenceFamiliesPanel({ engineer }) {
+  const families = engineer?.evidence?.supporting_families || {};
+  const active = engineer?.evidence?.active_families || [];
+
+  return (
+    <div className="panel">
+      <h3 className="panel-title">Evidence Families</h3>
+      <div className="family-list">
+        {EVIDENCE_KEYS.map(({ key, label }) => {
+          const on = families[key] === true;
+          return (
+            <div key={key} className={`family-row ${on ? "family-on" : "family-off"}`}>
+              <span className="family-dot">{on ? "●" : "○"}</span>
+              <span>{label}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="family-count">
+        {active.length} of {EVIDENCE_KEYS.length} active
+      </div>
+    </div>
+  );
+}
+
+// ── OperatorPanel ─────────────────────────────────────────────────────────────
+
+function OperatorPanel({ operator, engineer, onHoverSignal }) {
+  const op = operator || {};
+  const traj = op.trajectory || {};
+  const aw = actionWindow(traj, engineer?.evidence);
+  const pe = op.plain_english || {};
+  const wh = op.what_is_happening || {};
+
+  return (
+    <div className="panel operator-panel">
+      <h3 className="panel-title">Operator View</h3>
+
+      <div className="op-row">
+        <span className="op-label">What is happening</span>
+        <p className="op-val">{wh.summary || pe.what_this_means || "Awaiting structural change"}</p>
       </div>
 
-      {error && <div className="error-banner">{error}</div>}
+      <div className="op-row">
+        <span className="op-label">Where to look</span>
+        <p className="op-val">{pe.where_to_start || "Inspect top reported signals"}</p>
+      </div>
 
-      {selectedMachineId ? (
-        <DetailView
-          machineData={machineData[selectedMachineId]}
-          machineId={selectedMachineId}
-          onBack={() => setSelectedMachineId(null)}
-        />
-      ) : (
-        <FloorView
-          machines={MACHINES}
-          onSelectMachine={setSelectedMachineId}
-        />
+      <div className="op-row">
+        <span className="op-label">Direction</span>
+        <p className={`op-val direction-${traj.direction || "ambiguous"}`}>
+          {traj.direction === "diverging" ? "Diverging — moving away from baseline"
+            : traj.direction === "stabilizing" ? "Stabilizing — returning toward baseline"
+            : traj.direction === "flat" ? "Flat — no meaningful change"
+            : "Ambiguous — insufficient history"}
+        </p>
+      </div>
+
+      <div className="op-row">
+        <span className="op-label">Urgency</span>
+        <p className={`op-val urgency-${traj.urgency || "low"}`}>
+          {(traj.urgency || "low").toUpperCase()}
+        </p>
+      </div>
+
+      <div className="op-row">
+        <span className="op-label">Recommended next step</span>
+        <p className="op-val">
+          {op.recommended_next_step === "INSPECT_TOP_SIGNALS_AND_RELATIONSHIPS"
+            ? "Inspect top signals and their relationships"
+            : "Continue monitoring"}
+        </p>
+      </div>
+
+      {op.why_it_matters?.meaning && (
+        <div className="op-row">
+          <span className="op-label">Why it matters</span>
+          <p className="op-val muted">{op.why_it_matters.meaning}</p>
+        </div>
+      )}
+
+      {op.if_ignored?.expected_behavior && (
+        <div className="op-row">
+          <span className="op-label">If ignored</span>
+          <p className="op-val muted">{op.if_ignored.expected_behavior}</p>
+        </div>
+      )}
+
+      {aw && (
+        <div className="action-window">
+          <div className="aw-header">Action Window</div>
+          <div className="aw-body">
+            <div className="aw-row">
+              <span>Cycles</span><span className="aw-cycles">{aw.window}</span>
+            </div>
+            <div className="aw-row">
+              <span>Confidence</span>
+              <span className={`aw-conf conf-${aw.confidence}`}>{aw.confidence}</span>
+            </div>
+            <div className="aw-basis">{aw.basis}</div>
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
-export default App;
+// ── CorrTrendChart ────────────────────────────────────────────────────────────
+
+function CorrTrendChart({ corrHistory, milestones }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    const W = rect.width, H = rect.height;
+    ctx.fillStyle = "#060a1a";
+    ctx.fillRect(0, 0, W, H);
+
+    if (!corrHistory || corrHistory.length < 2) {
+      ctx.fillStyle = "#3a4a6a";
+      ctx.font = "12px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Awaiting correlation data…", W / 2, H / 2);
+      return;
+    }
+
+    const mg = { l: 36, r: 16, t: 24, b: 28 };
+    const pw = W - mg.l - mg.r, ph = H - mg.t - mg.b;
+    const n = corrHistory.length;
+    const toX = i => mg.l + (i / (n - 1)) * pw;
+    const toY = v => mg.t + ph - ((v + 1) / 2) * ph; // maps [-1,1] → [bottom,top]
+
+    // Grid & zero line
+    ctx.strokeStyle = "#1a2540"; ctx.lineWidth = 1;
+    [-1, -0.5, 0, 0.5, 1].forEach(v => {
+      const y = toY(v);
+      ctx.beginPath(); ctx.moveTo(mg.l, y); ctx.lineTo(mg.l + pw, y); ctx.stroke();
+      ctx.fillStyle = "#2a3a5a"; ctx.font = "9px sans-serif"; ctx.textAlign = "right";
+      ctx.fillText(v.toFixed(1), mg.l - 4, y + 3);
+    });
+
+    // Zero line accent
+    ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(mg.l, toY(0)); ctx.lineTo(mg.l + pw, toY(0)); ctx.stroke();
+
+    // Baseline corr reference
+    const baselineCorr = corrHistory.find(e => e.baseline != null)?.baseline;
+    if (baselineCorr != null) {
+      const yb = toY(baselineCorr);
+      ctx.setLineDash([4, 4]); ctx.strokeStyle = "rgba(70,130,200,0.4)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(mg.l, yb); ctx.lineTo(mg.l + pw, yb); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(70,130,200,0.6)"; ctx.font = "9px sans-serif"; ctx.textAlign = "left";
+      ctx.fillText("baseline", mg.l + 4, yb - 3);
+    }
+
+    // Coupling start marker
+    if (milestones?.firstWatch != null) {
+      const idx = corrHistory.findIndex(e => e.cycle >= milestones.firstWatch);
+      if (idx >= 0) {
+        const x = toX(idx);
+        ctx.strokeStyle = "rgba(255,184,77,0.4)"; ctx.lineWidth = 1.5; ctx.setLineDash([]);
+        ctx.beginPath(); ctx.moveTo(x, mg.t); ctx.lineTo(x, mg.t + ph); ctx.stroke();
+      }
+    }
+
+    // Correlation line — color shifts from blue→orange as it rises
+    for (let i = 1; i < n; i++) {
+      const v = corrHistory[i].corr ?? 0;
+      const frac = Math.max(0, Math.min(1, (v + 1) / 2));
+      const r = Math.round(70 + (255 - 70) * frac);
+      const g = Math.round(130 + (140 - 130) * frac);
+      const b = Math.round(200 + (0 - 200) * frac);
+      ctx.strokeStyle = `rgba(${r},${g},${b},0.9)`;
+      ctx.lineWidth = 2;
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(toX(i - 1), toY(corrHistory[i - 1].corr ?? 0));
+      ctx.lineTo(toX(i), toY(v));
+      ctx.stroke();
+    }
+
+    // Last value label
+    const last = corrHistory[n - 1].corr ?? 0;
+    ctx.fillStyle = last > 0.6 ? "#ff8c00" : "#7aacec";
+    ctx.font = "bold 11px sans-serif"; ctx.textAlign = "left";
+    ctx.fillText(`${last >= 0 ? "+" : ""}${last.toFixed(3)}`, mg.l + pw + 4, toY(last) + 4);
+
+    // Title
+    ctx.fillStyle = "#a3c4e0"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "left";
+    ctx.fillText("Spindle Vibration × Spindle Motor Current — correlation", mg.l, 16);
+  }, [corrHistory, milestones]);
+
+  return (
+    <div className="corr-trend-wrap">
+      <canvas ref={ref} style={{ width: "100%", height: "100%", display: "block" }} />
+    </div>
+  );
+}
+
+// ── PersistenceGate ───────────────────────────────────────────────────────────
+
+function PersistenceGate({ evidenceCount, persistenceWindow = 5, minHits = 3 }) {
+  const count = evidenceCount ?? 0;
+  const satisfied = count >= minHits;
+  return (
+    <div className="persistence-gate">
+      <div className="pg-label">
+        Persistence gate
+        <span className="pg-rule">{minHits}-of-{persistenceWindow}</span>
+      </div>
+      <div className="pg-slots">
+        {Array.from({ length: persistenceWindow }, (_, i) => (
+          <div
+            key={i}
+            className={`pg-slot ${i < count ? (satisfied ? "pg-hit-ok" : "pg-hit") : "pg-miss"}`}
+            title={i < count ? "above alert threshold" : "below threshold"}
+          />
+        ))}
+      </div>
+      <div className={`pg-status ${satisfied ? "pg-satisfied" : "pg-pending"}`}>
+        {satisfied ? "✓ Satisfied" : `${count} / ${minHits} needed`}
+      </div>
+    </div>
+  );
+}
+
+// ── ContributionBars ──────────────────────────────────────────────────────────
+
+function ContributionBars({ engineer }) {
+  const sigs = engineer?.contributors?.top_signals || [];
+  if (!sigs.length) return null;
+  const max = Math.max(...sigs.map(s => s.contribution || 0), 0.001);
+  return (
+    <div className="panel contrib-panel">
+      <h3 className="panel-title">Signal Contributions</h3>
+      <div className="contrib-list">
+        {sigs.map((s, i) => {
+          const pct = ((s.contribution || 0) / max) * 100;
+          const colors = ["#ff8c00", "#4682c8", "#4ade80"];
+          return (
+            <div key={i} className="contrib-row">
+              <div className="contrib-name">{s.signal}</div>
+              <div className="contrib-track">
+                <div
+                  className="contrib-fill"
+                  style={{ width: `${pct}%`, background: colors[i] || "#4682c8" }}
+                />
+              </div>
+              <div className="contrib-pct">{(s.contribution * 100).toFixed(1)}%</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── MachineStatusBar ──────────────────────────────────────────────────────────
+
+function MachineStatusBar({ machData, selectedId, onSelect }) {
+  return (
+    <div className="machine-status-bar">
+      {MACHINES.map(m => {
+        const d = machData[m.id];
+        const status = d?.lastStatus || "INITIALIZING";
+        const isSelected = m.id === selectedId;
+        return (
+          <button
+            key={m.id}
+            className={`msb-cell ${isSelected ? "msb-selected" : ""} msb-${status.toLowerCase()}`}
+            onClick={() => !isSelected && onSelect(m.id)}
+            title={`${m.id} — ${status}`}
+          >
+            <span className="msb-id">{m.id}</span>
+            <span className="msb-dot" />
+            <span className="msb-status">{status}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Sparkline ─────────────────────────────────────────────────────────────────
+
+function Sparkline({ values, color = "#4682c8", height = 32 }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas || values.length < 2) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = height * dpr;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    const W = rect.width, H = height;
+    ctx.clearRect(0, 0, W, H);
+    const mn = Math.min(...values), mx = Math.max(...values);
+    const range = mx - mn || 1;
+    const toX = i => (i / (values.length - 1)) * W;
+    const toY = v => H - ((v - mn) / range) * (H - 4) - 2;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    values.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
+    ctx.stroke();
+    // fill under
+    ctx.lineTo(toX(values.length - 1), H);
+    ctx.lineTo(toX(0), H);
+    ctx.closePath();
+    ctx.fillStyle = color.replace(")", ",0.12)").replace("rgb", "rgba");
+    ctx.fill();
+  }, [values, color, height]);
+  return <canvas ref={ref} style={{ width: "100%", height, display: "block" }} />;
+}
+
+// ── DriftChart ────────────────────────────────────────────────────────────────
+
+function DriftChart({ driftHistory, milestones }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    const W = rect.width, H = rect.height;
+    ctx.fillStyle = "#060a1a";
+    ctx.fillRect(0, 0, W, H);
+
+    if (!driftHistory || driftHistory.length < 2) {
+      ctx.fillStyle = "#3a4a6a";
+      ctx.font = "12px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Collecting data…", W / 2, H / 2);
+      return;
+    }
+
+    const mg = { l: 46, r: 16, t: 28, b: 32 };
+    const pw = W - mg.l - mg.r, ph = H - mg.t - mg.b;
+    const maxWatch = Math.max(...driftHistory.map(d => d.watch || 0));
+    const maxAlert = Math.max(...driftHistory.map(d => d.alert || 0));
+    const maxDrift = Math.max(...driftHistory.map(d => d.drift || 0));
+    const yMax = Math.max(maxDrift, maxAlert) * 1.15 || 1;
+    const n = driftHistory.length;
+    const toX = i => mg.l + (i / (n - 1)) * pw;
+    const toY = v => mg.t + ph - (v / yMax) * ph;
+
+    // Grid lines
+    ctx.strokeStyle = "#1a2540"; ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const y = mg.t + (i / 4) * ph;
+      ctx.beginPath(); ctx.moveTo(mg.l, y); ctx.lineTo(mg.l + pw, y); ctx.stroke();
+    }
+
+    // Threshold zones
+    if (maxWatch > 0) {
+      ctx.fillStyle = "rgba(255,184,77,0.06)";
+      ctx.fillRect(mg.l, toY(maxAlert), pw, toY(maxWatch) - toY(maxAlert));
+      ctx.fillStyle = "rgba(240,68,68,0.06)";
+      ctx.fillRect(mg.l, mg.t, pw, toY(maxAlert) - mg.t);
+    }
+
+    // Watch threshold line
+    if (maxWatch > 0) {
+      const yw = toY(maxWatch);
+      ctx.setLineDash([6, 4]); ctx.strokeStyle = "rgba(255,184,77,0.6)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(mg.l, yw); ctx.lineTo(mg.l + pw, yw); ctx.stroke();
+      ctx.fillStyle = "rgba(255,184,77,0.8)"; ctx.font = "10px sans-serif"; ctx.textAlign = "right";
+      ctx.fillText("WATCH", mg.l - 4, yw + 3);
+    }
+    // Alert threshold line
+    if (maxAlert > 0) {
+      const ya = toY(maxAlert);
+      ctx.setLineDash([6, 4]); ctx.strokeStyle = "rgba(240,68,68,0.7)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(mg.l, ya); ctx.lineTo(mg.l + pw, ya); ctx.stroke();
+      ctx.fillStyle = "rgba(240,68,68,0.8)"; ctx.textAlign = "right";
+      ctx.fillText("ALERT", mg.l - 4, ya + 3);
+    }
+    ctx.setLineDash([]);
+
+    // Milestone verticals
+    const msCycles = [
+      { cycle: milestones?.firstWatch, color: "rgba(255,184,77,0.4)", label: "W" },
+      { cycle: milestones?.firstAlert, color: "rgba(240,68,68,0.5)", label: "A" },
+    ];
+    msCycles.forEach(({ cycle, color, label }) => {
+      if (cycle == null) return;
+      const idx = driftHistory.findIndex(d => d.cycle >= cycle);
+      if (idx < 0) return;
+      const x = toX(idx);
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(x, mg.t); ctx.lineTo(x, mg.t + ph); ctx.stroke();
+      ctx.fillStyle = color; ctx.font = "bold 10px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText(label, x, mg.t - 4);
+    });
+
+    // Drift line
+    ctx.strokeStyle = "#7aacec"; ctx.lineWidth = 2; ctx.lineJoin = "round";
+    ctx.beginPath();
+    driftHistory.forEach((d, i) => {
+      const x = toX(i), y = toY(d.drift || 0);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Fill under drift line
+    ctx.lineTo(toX(n - 1), mg.t + ph);
+    ctx.lineTo(mg.l, mg.t + ph);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(70,130,200,0.1)";
+    ctx.fill();
+
+    // X axis labels
+    ctx.fillStyle = "#4a6a88"; ctx.font = "10px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(`cycle ${driftHistory[0].cycle}`, mg.l, mg.t + ph + 18);
+    ctx.fillText(`cycle ${driftHistory[n - 1].cycle}`, mg.l + pw, mg.t + ph + 18);
+
+    // Title
+    ctx.fillStyle = "#a3c4e0"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "left";
+    ctx.fillText("Structural Drift Score", mg.l, 18);
+  }, [driftHistory, milestones]);
+
+  return (
+    <div className="drift-chart-wrap">
+      <canvas ref={ref} style={{ width: "100%", height: "100%", display: "block" }} />
+    </div>
+  );
+}
+
+// ── CorrelationHeatmap ────────────────────────────────────────────────────────
+
+function CorrelationHeatmap({ sigHistory, signals }) {
+  const sigKeys = (signals || SIGNAL_NAMES).slice(0, 5);
+  const corr = computeCorrMatrix(sigHistory, 30, sigKeys);
+  const SHORT = sigKeys.map(k => k.replace(/_/g, " ").split(" ").map(w => w[0]?.toUpperCase()).join(""));
+
+  function cellColor(v) {
+    if (v === null) return "#162035";
+    const a = Math.abs(v);
+    if (v > 0) return `rgba(70,130,200,${0.1 + 0.75 * a})`;
+    return `rgba(220,80,60,${0.1 + 0.75 * a})`;
+  }
+
+  return (
+    <div className="panel heatmap-panel">
+      <h3 className="panel-title">Current Correlation</h3>
+      <div className="heatmap-grid">
+        <div className="hm-corner" />
+        {SHORT.map(s => <div key={s} className="hm-label hm-col-label">{s}</div>)}
+        {sigKeys.map((_, i) => (
+          <>
+            <div key={`row-${i}`} className="hm-label hm-row-label">{SHORT[i]}</div>
+            {sigKeys.map((__, j) => {
+              const v = corr ? corr[i][j] : null;
+              return (
+                <div
+                  key={`${i}-${j}`}
+                  className="hm-cell"
+                  style={{ background: cellColor(v) }}
+                  title={v != null ? `${SHORT[i]} × ${SHORT[j]}: ${v.toFixed(3)}` : ""}
+                >
+                  {i !== j && v != null ? (
+                    <span className="hm-val">{v.toFixed(2)}</span>
+                  ) : i === j ? (
+                    <span className="hm-diag">1</span>
+                  ) : null}
+                </div>
+              );
+            })}
+          </>
+        ))}
+      </div>
+      <div className="hm-legend">
+        <span className="hm-neg">neg</span>
+        <div className="hm-grad" />
+        <span className="hm-pos">pos</span>
+      </div>
+    </div>
+  );
+}
+
+// ── MilestonesRow ─────────────────────────────────────────────────────────────
+
+function MilestonesRow({ milestones }) {
+  const { baselineFormed, firstWatch, firstAlert } = milestones || {};
+  const items = [
+    { label: "Baseline formed", cycle: baselineFormed, color: "#4682c8" },
+    { label: "First Watch",     cycle: firstWatch,     color: "#ffb84d" },
+    { label: "First Alert",     cycle: firstAlert,     color: "#f04444" },
+  ];
+  return (
+    <div className="milestones-row">
+      {items.map(({ label, cycle, color }) => (
+        <div key={label} className="milestone-item">
+          <span className="ms-dot" style={{ background: cycle != null ? color : "#2a3a5a" }} />
+          <span className="ms-label">{label}</span>
+          <span className="ms-cycle" style={{ color: cycle != null ? color : "#3a4a6a" }}>
+            {cycle != null ? `cycle ${cycle}` : "—"}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── ConfidenceBar ─────────────────────────────────────────────────────────────
+
+function ConfidenceBar({ value }) {
+  const pct = Math.round((value || 0) * 100);
+  const color = pct >= 80 ? "#4ade80" : pct >= 50 ? "#ffb84d" : "#4682c8";
+  return (
+    <div className="conf-bar-wrap">
+      <div className="conf-bar-track">
+        <div className="conf-bar-fill" style={{ width: `${pct}%`, background: color }} />
+      </div>
+      <span className="conf-bar-label" style={{ color }}>{pct}%</span>
+    </div>
+  );
+}
+
+// ── TelemetryStrip ────────────────────────────────────────────────────────────
+
+function TelemetryStrip({ sigs, sigHistory, signals, signalLabels }) {
+  const keys   = signals || SIGNAL_NAMES;
+  const labels = signalLabels || SIGNAL_LABELS;
+  return (
+    <div className="telemetry-strip">
+      {keys.map(name => {
+        const v    = sigs?.[name];
+        const hist = (sigHistory?.[name] || []).slice(-40);
+        const lbl  = labels[name] || name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+        return (
+          <div key={name} className="telem-cell">
+            <div className="telem-name">{lbl}</div>
+            <div className="telem-val">{v != null && !isNaN(v) ? fmt(v, 3) : "—"}</div>
+            {hist.length >= 2 && <Sparkline values={hist} color="#4682c8" height={28} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── StateTimeline ─────────────────────────────────────────────────────────────
+
+function StateTimeline({ history }) {
+  const tail = history.slice(-50);
+  return (
+    <div className="timeline-wrap">
+      <div className="timeline-label">State History (last 50)</div>
+      <div className="timeline-bar">
+        {tail.map((h, i) => (
+          <div
+            key={i}
+            className={`tl-dot tl-${(h.status || "init").toLowerCase()}`}
+            title={`${h.cycle}: ${h.status}`}
+          />
+        ))}
+        {tail.length === 0 && <span className="muted" style={{ fontSize: 11 }}>No history yet</span>}
+      </div>
+    </div>
+  );
+}
+
+// ── EngineerDrawer ────────────────────────────────────────────────────────────
+
+function EngineerDrawer({ engineer }) {
+  const [open, setOpen] = useState(false);
+  const sm = engineer?.structural_metrics || {};
+  const tm = engineer?.trajectory_metrics || {};
+  const ev = engineer?.evidence || {};
+  const rels = engineer?.contributors?.top_relationships || [];
+  const sigs = engineer?.contributors?.top_signals || [];
+
+  return (
+    <div className="eng-drawer">
+      <button className="eng-toggle" onClick={() => setOpen(o => !o)}>
+        {open ? "▾" : "▸"} Engineer Metrics
+      </button>
+      {open && (
+        <div className="eng-content">
+          <div className="eng-section">
+            <div className="eng-section-title">Structural</div>
+            <table className="kv-table">
+              <tbody>
+                <tr><td>Drift score</td><td>{fmt(sm.structural_drift_score ?? sm.drift_score, 4)}</td></tr>
+                <tr><td>Rel stability</td><td>{fmt(sm.relational_stability, 4)}</td></tr>
+                <tr><td>Cov shift</td><td>{fmt(sm.covariance_shift, 4)}</td></tr>
+                <tr><td>Watch threshold</td><td>{fmt(sm.watch_threshold, 4)}</td></tr>
+                <tr><td>Alert threshold</td><td>{fmt(sm.alert_threshold, 4)}</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div className="eng-section">
+            <div className="eng-section-title">Trajectory</div>
+            <table className="kv-table">
+              <tbody>
+                <tr><td>Direction</td><td>{tm.direction || "—"}</td></tr>
+                <tr><td>Drift velocity</td><td>{fmt(tm.drift_velocity, 5)}</td></tr>
+                <tr><td>Drift acceleration</td><td>{fmt(tm.drift_acceleration, 5)}</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div className="eng-section">
+            <div className="eng-section-title">Evidence</div>
+            <table className="kv-table">
+              <tbody>
+                <tr><td>Count</td><td>{ev.evidence_count ?? "—"}</td></tr>
+                <tr><td>Time in state</td><td>{ev.time_in_state ?? "—"}</td></tr>
+                <tr><td>Confidence</td><td>{fmt(ev.confidence_score, 3)}</td></tr>
+                <tr><td>Active families</td><td>{(ev.active_families || []).length}</td></tr>
+              </tbody>
+            </table>
+          </div>
+          {rels.length > 0 && (
+            <div className="eng-section">
+              <div className="eng-section-title">Top Relationships</div>
+              {rels.slice(0, 3).map((r, i) => (
+                <div key={i} className="rel-row">
+                  <span className="rel-pair">{(r.pair || []).join(" ↔ ")}</span>
+                  <span className="rel-shift">Δ{fmt(r.correlation_shift, 3)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {sigs.length > 0 && (
+            <div className="eng-section">
+              <div className="eng-section-title">Top Signals</div>
+              {sigs.map((s, i) => (
+                <div key={i} className="rel-row">
+                  <span className="rel-pair">{s.signal}</span>
+                  <span className="rel-shift">{fmt(s.contribution, 3)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="eng-section">
+            <div className="eng-section-title">Pattern (engineer only)</div>
+            <div className="pattern-type">{engineer?.pattern?.type || "—"}</div>
+            <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>{engineer?.pattern?.rule_triggered || ""}</div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── EventsPanel ───────────────────────────────────────────────────────────────
+
+function EventsPanel({ machineId, events, onAck, onNote, onClose }) {
+  const [noteText, setNoteText] = useState("");
+  const openEvt = events.filter(e => e.status === "open").slice(-1)[0];
+
+  return (
+    <div className="panel events-panel">
+      <h3 className="panel-title">Active Events</h3>
+      {!openEvt ? (
+        <p className="muted">No open events</p>
+      ) : (
+        <div className="event-card">
+          <div className="event-id">{openEvt.event_id}</div>
+          <div className="event-summary">{openEvt.summary}</div>
+          <div className="event-meta">
+            <StatusBadge status={openEvt.urgency?.toUpperCase()} size="sm" />
+            <span className="muted">{openEvt.timestamp?.slice(0, 19).replace("T", " ")}</span>
+          </div>
+          {openEvt.notes?.length > 0 && (
+            <div className="event-notes">
+              {openEvt.notes.map((n, i) => (
+                <div key={i} className="event-note">» {n.text}</div>
+              ))}
+            </div>
+          )}
+          <div className="event-actions">
+            <input
+              value={noteText}
+              onChange={e => setNoteText(e.target.value)}
+              placeholder="Add note…"
+              className="note-input"
+            />
+            <button onClick={() => { onNote(noteText); setNoteText(""); }} disabled={!noteText}>
+              Add Note
+            </button>
+            {!openEvt.acknowledged && (
+              <button onClick={onAck} className="btn-ack">Acknowledge</button>
+            )}
+            <button onClick={onClose} className="btn-close-event">Close Event</button>
+          </div>
+        </div>
+      )}
+      {events.filter(e => e.status === "closed").length > 0 && (
+        <div className="closed-events">
+          <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>
+            {events.filter(e => e.status === "closed").length} closed event(s)
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── MachineCard (floor view) ──────────────────────────────────────────────────
+
+function MachineCard({ machine, data, onSelect }) {
+  const status = data?.lastStatus || "INITIALIZING";
+  return (
+    <button className={`machine-card machine-card-${status.toLowerCase()}`} onClick={onSelect}>
+      <div className="mc-id">{machine.id}</div>
+      <div className="mc-type">{machine.type}</div>
+      <StatusBadge status={status} size="sm" />
+      <div className="mc-cycle muted">cycle {data?.cycle ?? 0}</div>
+    </button>
+  );
+}
+
+// ── DetailView ────────────────────────────────────────────────────────────────
+
+function DetailView({ machineId, machine, data, events, onBack, onNote, onAck, onClose, machData, onSelectMachine, replaySession }) {
+  const [hover, setHover] = useState(null);
+  const op  = data?.out?.operator || {};
+  const eng = data?.out?.engineer || {};
+  const status = op.status || "INITIALIZING";
+  const timeInState = eng?.evidence?.time_in_state;
+  const confidence  = eng?.evidence?.confidence_score;
+  const evidenceCount = eng?.evidence?.evidence_count;
+  const phase = machineId === "CNC-01" ? demoPhaseLabel(data?.cycle ?? 0) : null;
+  const isReplayMachine = machineId === "CNC-01" && replaySession;
+  const activeSignals   = isReplayMachine ? replaySession.signals : SIGNAL_NAMES;
+  const activeLabels    = isReplayMachine ? replaySession.signalLabels : SIGNAL_LABELS;
+
+  function exportBrief() {
+    const brief = {
+      machine: machineId,
+      cycle: data?.cycle,
+      timestamp: new Date().toISOString(),
+      operator: op,
+      engineer: eng,
+      milestones: data?.milestones,
+    };
+    const blob = new Blob([JSON.stringify(brief, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `neraium-brief-${machineId}-c${data?.cycle}.json`;
+    a.click();
+  }
+
+  return (
+    <div className={`detail-view ${status === "ALERT" || status === "ALERT_HELD" ? "state-alert-active" : ""}`}>
+      {/* Machine status bar */}
+      <MachineStatusBar machData={machData} selectedId={machineId} onSelect={onSelectMachine} />
+
+      {/* Header */}
+      <div className="detail-header">
+        <button className="back-btn" onClick={onBack}>← Floor</button>
+        <div className="dh-titles">
+          <span className="dh-brand">Neraium</span>
+          <span className="dh-sub">CNC Manufacturing Cell · {machine.type}</span>
+          <span className="dh-tag">Live Structural Intelligence</span>
+        </div>
+        <div className="dh-right">
+          <StatusBadge status={status} />
+          {timeInState != null && (
+            <span className="time-in-state muted">{timeInState}c in state</span>
+          )}
+          {phase && <span className="demo-phase">{phase}</span>}
+          <div className="dh-cycle muted">Cycle {data?.cycle ?? 0}</div>
+          <button className="btn-export" onClick={exportBrief} title="Download engineer brief as JSON">
+            ↓ Brief
+          </button>
+        </div>
+      </div>
+
+      {/* Milestones */}
+      <MilestonesRow milestones={data?.milestones} />
+
+      {/* Main grid */}
+      <div className="detail-grid">
+        {/* Left column */}
+        <div className="left-col">
+          <CovarianceChart sigHistory={data?.sigHistory} highlightPair={hover} signals={activeSignals} />
+          <div className="metrics-row">
+            <StructuralMetricsPanel engineer={eng} />
+            <EvidenceFamiliesPanel engineer={eng} />
+          </div>
+          <CorrelationHeatmap sigHistory={data?.sigHistory} signals={activeSignals} />
+          <div className="note-banner">
+            No individual signal threshold is required. Neraium detects structural relationship change.
+          </div>
+        </div>
+
+        {/* Right column */}
+        <div className="right-col">
+          {confidence != null && <ConfidenceBar value={confidence} />}
+          <PersistenceGate evidenceCount={evidenceCount} persistenceWindow={5} minHits={3} />
+          <OperatorPanel operator={op} engineer={eng} onHoverSignal={setHover} />
+          <ContributionBars engineer={eng} />
+          <EventsPanel
+            machineId={machineId}
+            events={events}
+            onAck={onAck}
+            onNote={onNote}
+            onClose={onClose}
+          />
+        </div>
+      </div>
+
+      {/* Correlation trend + drift chart side by side */}
+      <div className="charts-row">
+        <CorrTrendChart corrHistory={data?.corrHistory} milestones={data?.milestones} />
+        <DriftChart driftHistory={data?.driftHistory} milestones={data?.milestones} />
+      </div>
+
+      {/* Telemetry + timeline */}
+      <TelemetryStrip sigs={data?.lastSigs} sigHistory={data?.sigHistory} signals={activeSignals} signalLabels={activeLabels} />
+      <StateTimeline history={data?.history || []} />
+
+      {/* Engineer drawer */}
+      <EngineerDrawer engineer={eng} />
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [selected, setSelected]       = useState(null);
+  const [machData, setMachData]       = useState(() => Object.fromEntries(MACHINES.map(m => [m.id, emptyMachine()])));
+  const [machEvents, setMachEvents]   = useState(() => Object.fromEntries(MACHINES.map(m => [m.id, []])));
+  const [running, setRunning]         = useState(false);
+  const [speed, setSpeed]             = useState("normal");
+  const [apiBase, setApiBase]         = useState(API_BASE);
+  const [connected, setConnected]     = useState(false);
+  const [error, setError]             = useState("");
+  const [csvName, setCsvName]         = useState("");
+  const [srcMode, setSrcMode]         = useState("demo"); // "demo" | "csv"
+  // replay session: { sessionId, totalRows, signals, signalLabels, platform } | null
+  const [replaySession, setReplaySession] = useState(null);
+  const [replayProgress, setReplayProgress] = useState({ current: 0, total: 0 });
+
+  const timerRef      = useRef(null);
+  const rngs          = useRef(Object.fromEntries(MACHINES.map((m, i) => [m.id, createRng(42 + i)])));
+  const cycles        = useRef(Object.fromEntries(MACHINES.map(m => [m.id, 0])));
+  const apiRef        = useRef(apiBase);
+  const srcRef        = useRef(srcMode);
+  const replayRef     = useRef(replaySession);
+
+  useEffect(() => { apiRef.current    = apiBase; },       [apiBase]);
+  useEffect(() => { srcRef.current    = srcMode; },       [srcMode]);
+  useEffect(() => { replayRef.current = replaySession; }, [replaySession]);
+  useEffect(() => { csvRef.current = csvRows; }, [csvRows]);
+
+  useEffect(() => {
+    let alive = true;
+    fetch(`${apiBase}/health`).then(() => alive && setConnected(true)).catch(() => alive && setConnected(false));
+    return () => { alive = false; };
+  }, [apiBase]);
+
+  useEffect(() => () => stopDemo(), []);
+
+  const runningRef = useRef(running);
+  useEffect(() => { runningRef.current = running; }, [running]);
+
+  // Spacebar → toggle start/stop
+  useEffect(() => {
+    function onKey(e) {
+      if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+      if (e.code === "Space") {
+        e.preventDefault();
+        if (runningRef.current) stopDemo(); else startDemo();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  async function sendCycle() {
+    const base    = apiRef.current;
+    const session = replayRef.current;
+    const isReplay = srcRef.current === "csv" && session;
+
+    const results = await Promise.all(MACHINES.map(async m => {
+      const c   = cycles.current[m.id];
+      const isReplayMachine = isReplay && m.id === "CNC-01";
+
+      let out, sigs;
+
+      if (isReplayMachine) {
+        const n   = session.tickN ?? 1;
+        const res = await fetch(`${base}/replay/${session.sessionId}/tick?n=${n}`, { method: "POST" });
+        if (!res.ok) throw new Error(`/replay/tick → ${res.status}`);
+        const data = await res.json();
+        if (data.replay?.done || data.done) {
+          stopDemo();
+          return null;
+        }
+        out  = data;
+        sigs = data.signal_values || {};
+        setReplayProgress({ current: data.replay?.current_row ?? 0, total: data.replay?.total_rows ?? session.totalRows });
+      } else {
+        sigs = demoPacket(m.id, c, rngs.current[m.id]);
+        const body = { asset_id: m.id, signals: sigs, cycle: c, timestamp: new Date().toISOString() };
+        const res  = await fetch(`${base}/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(`/update → ${res.status}`);
+        out = await res.json();
+      }
+
+      cycles.current[m.id] = c + 1;
+      return { id: m.id, c, out, sigs, isReplay: isReplayMachine };
+    }));
+
+    const valid = results.filter(Boolean);
+    if (!valid.length) { stopDemo(); return; }
+    setConnected(true);
+
+    const activeSignals = (session?.signals) || SIGNAL_NAMES;
+
+    setMachData(prev => {
+      const next = { ...prev };
+      valid.forEach(({ id, c, out, sigs, isReplay: isRM }) => {
+        const p      = prev[id] || emptyMachine();
+        const status = out?.operator?.status || "INITIALIZING";
+        const ms     = { ...p.milestones };
+        if (!ms.baselineFormed && status !== "INITIALIZING") ms.baselineFormed = c;
+        if (!ms.firstWatch && status === "WATCH")            ms.firstWatch = c;
+        if (!ms.firstAlert && (status === "ALERT" || status === "ALERT_HELD")) ms.firstAlert = c;
+
+        const sigKeys  = isRM ? activeSignals : SIGNAL_NAMES;
+        const newSigH  = Object.fromEntries(sigKeys.map(n => [
+          n, [...(p.sigHistory[n] || []), sigs[n] ?? 0].slice(-120),
+        ]));
+
+        const sm = out?.engineer?.structural_metrics || {};
+        const driftEntry = {
+          cycle: c,
+          drift: sm.structural_drift_score ?? sm.drift_score ?? 0,
+          watch: sm.watch_threshold ?? 0,
+          alert: sm.alert_threshold ?? 0,
+        };
+
+        const topRel = out?.engineer?.contributors?.top_relationships?.[0] || {};
+        const corrEntry = {
+          cycle: c,
+          corr: topRel.current_correlation ?? null,
+          baseline: topRel.baseline_correlation ?? null,
+        };
+
+        next[id] = {
+          out,
+          cycle: c + 1,
+          history: [...p.history, { cycle: c, status }].slice(-100),
+          driftHistory: [...(p.driftHistory || []), driftEntry].slice(-150),
+          corrHistory: [...(p.corrHistory || []), corrEntry].filter(e => e.corr != null).slice(-150),
+          sigHistory: newSigH,
+          lastSigs: sigs,
+          milestones: ms,
+          lastStatus: status,
+        };
+      });
+      return next;
+    });
+
+    // Sync events from API
+    const evRes = await fetch(`${apiRef.current}/events`).catch(() => null);
+    if (evRes?.ok) {
+      const evData = await evRes.json();
+      setMachEvents(Object.fromEntries(MACHINES.map(m => [
+        m.id, evData.filter(e => e.machine_id === m.id),
+      ])));
+    }
+  }
+
+  function startDemo() {
+    if (running) return;
+    setRunning(true);
+    setError("");
+    timerRef.current = setInterval(() => {
+      sendCycle().catch(err => { setError(err.message); stopDemo(); });
+    }, DEMO_SPEEDS[speed] || 450);
+  }
+
+  function stopDemo() {
+    clearInterval(timerRef.current);
+    timerRef.current = null;
+    setRunning(false);
+  }
+
+  async function handleReset() {
+    stopDemo();
+    const session = replayRef.current;
+    await Promise.all([
+      fetch(`${apiBase}/reset`, { method: "POST" }).catch(() => {}),
+      session
+        ? fetch(`${apiBase}/replay/${session.sessionId}/reset`, { method: "POST" }).catch(() => {})
+        : Promise.resolve(),
+    ]);
+    setReplayProgress({ current: 0, total: session?.totalRows ?? 0 });
+    setMachData(Object.fromEntries(MACHINES.map(m => [m.id, emptyMachine()])));
+    setMachEvents(Object.fromEntries(MACHINES.map(m => [m.id, []])));
+    MACHINES.forEach((m, i) => {
+      cycles.current[m.id] = 0;
+      rngs.current[m.id] = createRng(42 + i);
+    });
+    setError("");
+  }
+
+  async function handleCsvUpload(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const mb = (file.size / 1048576).toFixed(1);
+    setCsvName(`${file.name} (uploading…)`);
+    setError("");
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      const res = await fetch(`${apiBase}/replay/upload`, { method: "POST", body: form });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || "Upload failed");
+      }
+      const data = await res.json();
+      // Server tells us rows per tick so any file size replays in ~200 ticks
+      const tickN = data.tick_n ?? Math.max(1, Math.ceil(data.total_rows / 200));
+      setReplaySession({
+        sessionId   : data.session_id,
+        totalRows   : data.total_rows,
+        signals     : data.signals,
+        signalLabels: data.signal_labels || {},
+        platform    : data.platform,
+        filename    : data.filename,
+        tickN,
+      });
+      setReplayProgress({ current: 0, total: data.total_rows });
+      setCsvName(`${data.filename} (${data.total_rows.toLocaleString()} rows)`);
+      setSrcMode("csv");
+    } catch (err) {
+      setError(`CSV upload: ${err.message}`);
+      setCsvName(file.name);
+      setSrcMode("demo");
+    }
+  }
+
+  // Event actions
+  async function handleAck(machineId) {
+    await fetch(`${apiBase}/events/${machineId}/acknowledge`, { method: "POST" }).catch(() => {});
+    const res = await fetch(`${apiBase}/events`).catch(() => null);
+    if (res?.ok) {
+      const d = await res.json();
+      setMachEvents(Object.fromEntries(MACHINES.map(m => [m.id, d.filter(e => e.machine_id === m.id)])));
+    }
+  }
+
+  async function handleNote(machineId, text) {
+    await fetch(`${apiBase}/events/${machineId}/note`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: text }),
+    }).catch(() => {});
+    const res = await fetch(`${apiBase}/events`).catch(() => null);
+    if (res?.ok) {
+      const d = await res.json();
+      setMachEvents(Object.fromEntries(MACHINES.map(m => [m.id, d.filter(e => e.machine_id === m.id)])));
+    }
+  }
+
+  async function handleClose(machineId) {
+    await fetch(`${apiBase}/events/${machineId}/close`, { method: "POST" }).catch(() => {});
+    const res = await fetch(`${apiBase}/events`).catch(() => null);
+    if (res?.ok) {
+      const d = await res.json();
+      setMachEvents(Object.fromEntries(MACHINES.map(m => [m.id, d.filter(e => e.machine_id === m.id)])));
+    }
+  }
+
+  const selMachine = MACHINES.find(m => m.id === selected);
+
+  return (
+    <div className="app">
+      {/* Controls bar */}
+      <div className="ctrl-bar">
+        <div className="ctrl-left">
+          <span className={`conn-dot ${connected ? "conn-ok" : "conn-off"}`} />
+          <input
+            className="api-input"
+            value={apiBase}
+            onChange={e => setApiBase(e.target.value)}
+            title="API base URL"
+          />
+        </div>
+        <div className="ctrl-center">
+          {running && <span className="live-dot" title="Recording" />}
+          <button onClick={startDemo} disabled={running} className="btn-start">▶ Start</button>
+          <button onClick={stopDemo} disabled={!running}>■ Stop</button>
+          <select value={speed} onChange={e => setSpeed(e.target.value)} disabled={running}>
+            <option value="slow">Slow</option>
+            <option value="normal">Normal</option>
+            <option value="fast">Fast</option>
+          </select>
+          <label className={`src-toggle ${srcMode === "csv" ? "src-active" : ""}`}>
+            <input type="radio" name="src" value="demo" checked={srcMode === "demo"} onChange={() => setSrcMode("demo")} /> Demo
+          </label>
+          <label className={`src-toggle ${srcMode === "csv" ? "src-active" : ""}`}>
+            <input type="radio" name="src" value="csv" checked={srcMode === "csv"} onChange={() => setSrcMode("csv")} /> CSV
+          </label>
+          {srcMode === "csv" && (
+            <label className="csv-upload-label">
+              {csvName || "Upload CSV"}
+              <input type="file" accept=".csv" onChange={handleCsvUpload} style={{ display: "none" }} />
+            </label>
+          )}
+          {srcMode === "csv" && replaySession && replayProgress.total > 0 && (() => {
+            const pct  = Math.round(replayProgress.current / replayProgress.total * 100);
+            const big  = replayProgress.total > 9999;
+            const lbl  = big
+              ? `${pct}%  ·  ${replayProgress.current.toLocaleString()} / ${replayProgress.total.toLocaleString()}`
+              : `${replayProgress.current} / ${replayProgress.total}`;
+            const plat = replaySession.platform && replaySession.platform !== "Unknown"
+              ? ` · ${replaySession.platform}` : "";
+            return (
+              <div className="replay-progress">
+                <div className="replay-bar" style={{ width: `${pct}%` }} />
+                <span className="replay-label">{lbl}{plat}</span>
+              </div>
+            );
+          })()}
+        </div>
+        <div className="ctrl-right">
+          <button onClick={handleReset} className="btn-reset">Reset</button>
+        </div>
+      </div>
+
+      {error && <div className="error-bar">{error}</div>}
+
+      {/* Floor or Detail */}
+      {!selected ? (
+        <div className="floor-view">
+          <div className="floor-hdr">
+            <div className="floor-brand">Neraium</div>
+            <div className="floor-sub">Manufacturing Floor · Structural Intelligence</div>
+          </div>
+          <div className="machines-grid">
+            {MACHINES.map(m => (
+              <MachineCard
+                key={m.id}
+                machine={m}
+                data={machData[m.id]}
+                onSelect={() => setSelected(m.id)}
+              />
+            ))}
+          </div>
+          <div className="floor-note muted">
+            Select a machine to view structural evidence
+          </div>
+        </div>
+      ) : (
+        <DetailView
+          machineId={selected}
+          machine={selMachine}
+          data={machData[selected]}
+          events={machEvents[selected] || []}
+          onBack={() => setSelected(null)}
+          onAck={() => handleAck(selected)}
+          onNote={t => handleNote(selected, t)}
+          onClose={() => handleClose(selected)}
+          machData={machData}
+          onSelectMachine={setSelected}
+          replaySession={replaySession}
+        />
+      )}
+    </div>
+  );
+}

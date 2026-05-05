@@ -1,0 +1,14 @@
+[Unit]
+Description=Neraium API
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/neraium
+ExecStart=/home/ubuntu/.local/bin/uvicorn api.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=3
+Environment=PYTHONPATH=/home/ubuntu/neraium
+
+[Install]
+WantedBy=multi-user.target
