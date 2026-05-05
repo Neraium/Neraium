@@ -8,3 +8,8 @@ frontend/dist/
 .env.local
 *.env
 .DS_Store
+
+results/
+data/
+*.csv
+*.json
