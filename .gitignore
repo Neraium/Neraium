@@ -5,3 +5,14 @@ __pycache__/
 __pycache__/
 *.pyc
 *.pyo
+results/
+results/
+results/
+
+results/
+data/
+*.csv
+
+results/
+data/
+*.csv
